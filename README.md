@@ -2,7 +2,7 @@
 
 IDE-style navigation for EU5 PDX script, across mod + vanilla. Built for
 agent workflows: every result carries the enclosing definition and its exact
-line span, so the next step is a surgical read — never another broad grep.
+line span, so the next step is a surgical read instead of another broad grep.
 
 ## Commands
 
@@ -28,7 +28,7 @@ sul_estate_wages_pay_all (effect .../sul_estate_wages.txt:19-25, mod)
 ```
 
 `refs`/`vars` also detect `$param$`-templated constructions
-(`sul_pay_frac_$ESTATE$`) that expand to the queried name — without this,
+(`sul_pay_frac_$ESTATE$`) that expand to the queried name. Without this,
 generated names look like they are never written.
 
 ## How it works
