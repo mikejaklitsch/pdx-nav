@@ -1131,12 +1131,27 @@ def cmd_rebuild(args, _sources):
 WORD_RE = re.compile(r'[A-Za-z_@][\w.]*')
 GRAPH_EXCLUDE_KINDS = {"loc", "gui", "template", "type", "types",
                         "local_template", "map_modes"}
+GRAPH_DEFAULT_KINDS = {"on_action", "effect", "event", "script_value",
+                        "static_modifiers", "auto_modifiers",
+                        "modifier_type_definitions"}
 GRAPH_TEMPLATE_RE = re.compile(
     r'(?:[A-Za-z_][\w.]*)?'     # optional static prefix
     r'(?:\$\w+\$[\w.]*)'        # first $param$ segment
     r'(?:[\w.]*\$\w+\$[\w.]*)*' # additional segments
 )
 GRAPH_NOISE_NAMES = {"namespace", "l_english"}
+GRAPH_VAR_WRITE_KW = re.compile(
+    r'\b(?:set|change|round|clamp|divide|multiply|subtract_from|add_to'
+    r'|remove_from|cmf_change)_?\w*variable\w*\s*=')
+GRAPH_VAR_HAS_RE = re.compile(r'\bhas_\w*variable\s*=\s*(\w+)')
+GRAPH_VAR_NAME_RE = re.compile(r'\bname\s*=\s*(\w+)')
+GRAPH_VAR_REF_RE = re.compile(r'\b(?:global_|local_)?var:(\w+)')
+GRAPH_VARMAP_RE = re.compile(r'variable_map\(\s*(\w+)\s*\|')
+GRAPH_VARLIST_RE = re.compile(
+    r'(?:add_to_variable_list|remove_from_variable_list'
+    r'|is_in_variable_list|clear_variable_list'
+    r'|every_in_variable_list|any_in_variable_list'
+    r'|ordered_in_variable_list|variable_list_size)\s*=\s*(\w+)')
 LOC_CONVENTION_PREFIXES = (
     "MODIFIER_TYPE_NAME_", "MODIFIER_TYPE_DESC_",
     "STATIC_MODIFIER_NAME_", "STATIC_MODIFIER_DESC_",
@@ -1144,9 +1159,10 @@ LOC_CONVENTION_PREFIXES = (
 )
 
 
-def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None):
+def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None,
+                track_vars=False):
     """Build a directed graph of mod definitions.
-    Returns (nodes, edges, entry_points) where:
+    Returns (nodes, edges, entry_points, gui_refs) where:
       nodes = {name: (kind, file, start, end)}
       edges = {name: set(target_names)}  (name references target)
       entry_points = set(names) that the engine evaluates directly
@@ -1168,6 +1184,7 @@ def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None):
     LIST_PREFIXES = ("every_", "ordered_", "any_", "random_")
     edges = {n: set() for n in nodes}
     entry_points = set()
+    var_refs = {}  # {def_name: {(var_name, role)}} where role = W/R/M/L
 
     file_cache = {}
     for d in mod_src.idx["defs"]:
@@ -1188,7 +1205,9 @@ def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None):
         is_gui = mod_src.files[fi].endswith(".gui")
         block_tokens = set()
         template_tokens = set()
+        block_vars = set()
         in_string = False
+        in_var_write = False
         for line in lines[start - 1:end]:
             code, _, masked, in_string = split_line(line, in_string)
             if is_gui:
@@ -1197,6 +1216,22 @@ def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None):
                 block_tokens.update(WORD_RE.findall(masked))
             if "$" in code:
                 template_tokens.update(GRAPH_TEMPLATE_RE.findall(code))
+            if track_vars:
+                if GRAPH_VAR_WRITE_KW.search(masked):
+                    in_var_write = True
+                if in_var_write:
+                    for m in GRAPH_VAR_NAME_RE.finditer(masked):
+                        block_vars.add((m.group(1), "W"))
+                    if "}" in masked:
+                        in_var_write = False
+                for m in GRAPH_VAR_HAS_RE.finditer(masked):
+                    block_vars.add((m.group(1), "R"))
+                for m in GRAPH_VAR_REF_RE.finditer(masked):
+                    block_vars.add((m.group(1), "R"))
+                for m in GRAPH_VARMAP_RE.finditer(masked):
+                    block_vars.add((m.group(1), "M"))
+                for m in GRAPH_VARLIST_RE.finditer(masked):
+                    block_vars.add((m.group(1), "L"))
         block_tokens.discard(name)
         matched = block_tokens & name_set
         for tok in block_tokens - name_set:
@@ -1214,6 +1249,26 @@ def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None):
                 if candidate.startswith(prefix) and template_matches(tok, candidate):
                     matched.add(candidate)
         edges[name] = matched
+        if block_vars:
+            var_refs[name] = block_vars
+
+    if track_vars and var_refs:
+        all_vars = set()
+        for pairs in var_refs.values():
+            for vn, role in pairs:
+                all_vars.add(vn)
+        for vn in all_vars:
+            var_key = f"var:{vn}"
+            nodes[var_key] = ("variable", "", 0, 0)
+            edges[var_key] = set()
+        for def_name, pairs in var_refs.items():
+            for vn, role in pairs:
+                var_key = f"var:{vn}"
+                if role == "W":
+                    edges[def_name].add(var_key)
+                else:
+                    edges[var_key].add(def_name)
+        name_set = set(nodes.keys())
 
     gui_refs = scan_gui_references(mod_src, name_set)
     entry_points.update(gui_refs)
@@ -1353,15 +1408,25 @@ def cmd_graph(args, sources):
         return 1
 
     sys.stderr.write("pdx-nav: building dependency graph...\n")
-    include = set(args.kind) if args.kind else None
-    exclude = None if include else (set(GRAPH_EXCLUDE_KINDS) if not args.all else set())
+    if args.kind:
+        include = set()
+        for k in args.kind:
+            include.update(k.replace(",", " ").split())
+        exclude = None
+    elif args.all:
+        include, exclude = None, set()
+    else:
+        include, exclude = set(GRAPH_DEFAULT_KINDS), None
     if exclude is not None:
         if args.include_loc:
             exclude.discard("loc")
         if args.include_gui:
             exclude -= {"gui", "template", "type", "types", "local_template"}
+    if args.vars and include is not None:
+        include.add("variable")
     nodes, edges, entry_points, gui_refs = build_graph(
-        mod_src, sources, include_kinds=include, exclude_kinds=exclude)
+        mod_src, sources, include_kinds=include, exclude_kinds=exclude,
+        track_vars=args.vars)
     reachable, components, orphans = compute_reachability(nodes, edges, entry_points)
 
     engine_eps = entry_points - gui_refs
@@ -1372,6 +1437,26 @@ def cmd_graph(args, sources):
         for t in targets:
             if t in in_edges:
                 in_edges[t].add(src)
+
+    # --- Drill-down mode: show subtree rooted at a specific definition ---
+    if args.name:
+        name = args.name
+        if name not in nodes:
+            print(f"No definition found for '{name}'")
+            suggest(name, sources)
+            return 1
+        kind = nodes[name][0]
+        loc = f"{nodes[name][1]}:{nodes[name][2]}-{nodes[name][3]}" if nodes[name][1] else ""
+        callers = sorted(in_edges.get(name, set()))
+        ep_tag = " [entry point]" if name in entry_points else ""
+        gui_tag = " [gui]" if name in gui_refs else ""
+        print(f"{name} ({kind}){ep_tag}{gui_tag}  {loc}")
+        if callers:
+            print(f"├── called by: {', '.join(callers[:10])}"
+                  + (f" +{len(callers)-10}" if len(callers) > 10 else ""))
+        seen = {name}
+        dep_tree(name, edges, nodes, 1, seen, "", args.depth)
+        return 0
 
     # collect sections
     sections = []
@@ -1602,6 +1687,8 @@ def main():
     g.add_argument("-n", "--limit", type=int, default=50)
 
     gr = sub.add_parser("graph", help="Dependency graph of all mod definitions")
+    gr.add_argument("name", nargs="?", default=None,
+                    help="Drill into a specific definition's subtree")
     gr.add_argument("--depth", type=int, default=4,
                     help="Max tree depth for entry point expansion")
     gr.add_argument("--orphans-only", action="store_true",
@@ -1609,14 +1696,16 @@ def main():
     gr.add_argument("--cross-limit", type=int, default=10,
                     help="Max connections shown per cross-system pair")
     gr.add_argument("--include-loc", action="store_true",
-                    help="Include localization keys (excluded by default)")
+                    help="Include localization keys")
     gr.add_argument("--include-gui", action="store_true",
-                    help="Include GUI templates/types (excluded by default)")
+                    help="Include GUI templates/types")
     gr.add_argument("--all", action="store_true",
                     help="Include all definition kinds (loc, gui, etc.)")
     gr.add_argument("--kind", action="append", metavar="KIND",
-                    help="Only include these kinds (repeatable, e.g. "
-                    "--kind effect --kind event --kind script_value)")
+                    help="Only include these kinds (comma or space "
+                    "separated, e.g. --kind 'effect,event,script_value')")
+    gr.add_argument("--vars", action="store_true",
+                    help="Include variables, variable_maps, variable_lists")
 
     sub.add_parser("rebuild", help="Force index rebuild")
 
