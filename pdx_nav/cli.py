@@ -2,7 +2,8 @@ import argparse
 import sys
 
 from .commands import (cmd_def, cmd_show, cmd_context, cmd_refs, cmd_callers,
-                       cmd_stack, cmd_vars, cmd_list, cmd_grep, cmd_rebuild)
+                       cmd_stack, cmd_vars, cmd_list, cmd_grep, cmd_rename,
+                       cmd_rebuild)
 from .graph import cmd_graph
 from .source import load_sources
 
@@ -83,6 +84,12 @@ def main():
     gr.add_argument("--paths", action="store_true",
                     help="Show file paths on definitions")
 
+    rn = sub.add_parser("rename", help="Rename a symbol across all mod files")
+    rn.add_argument("old", help="Current name")
+    rn.add_argument("new", help="New name")
+    rn.add_argument("--dry-run", action="store_true",
+                    help="Show what would change without writing files")
+
     sub.add_parser("rebuild", help="Force index rebuild")
 
     args = p.parse_args()
@@ -104,7 +111,7 @@ def main():
         "def": cmd_def, "show": cmd_show, "context": cmd_context,
         "refs": cmd_refs, "callers": cmd_callers, "stack": cmd_stack,
         "vars": cmd_vars, "list": cmd_list, "grep": cmd_grep,
-        "graph": cmd_graph,
+        "rename": cmd_rename, "graph": cmd_graph,
     }[args.cmd](args, sources)
 
 

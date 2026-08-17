@@ -391,6 +391,55 @@ def cmd_list_file(args, sources):
     return 0
 
 
+def cmd_rename(args, sources):
+    old, new = args.old, args.new
+    pat = re.compile(rf'(?<!\w){re.escape(old)}(?!\w)')
+
+    mod_src = None
+    for s in sources:
+        if s.name == "mod":
+            mod_src = s
+            break
+    if not mod_src:
+        print("Error: no mod root found")
+        return 1
+
+    changed = []
+    total = 0
+    for rel in mod_src.files:
+        path = mod_src.root / rel
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        has_bom = raw[:3] == b'\xef\xbb\xbf'
+        text = (raw[3:] if has_bom else raw).decode('utf-8', errors='replace')
+        new_text, count = pat.subn(new, text)
+        if count == 0:
+            continue
+        if not args.dry_run:
+            out = (b'\xef\xbb\xbf' + new_text.encode('utf-8')) if has_bom else new_text.encode('utf-8')
+            path.write_bytes(out)
+        changed.append((rel, count))
+        total += count
+
+    verb = "would rename" if args.dry_run else "renamed"
+    print(f"{verb} '{old}' -> '{new}': {total} occurrences in {len(changed)} files")
+    for rel, count in changed:
+        print(f"  {rel}: {count}")
+
+    if not args.dry_run and total > 0:
+        print(f"\nRun `pdx-nav rebuild` to update the index.")
+
+    vanilla_defs = sum(len(s.by_name.get(old, []))
+                       for s in sources if s.name != "mod")
+    if vanilla_defs:
+        print(f"\nNote: '{old}' also exists in vanilla "
+              f"({vanilla_defs} definitions), not modified.")
+
+    return 0 if total > 0 else 1
+
+
 def cmd_rebuild(args, _sources):
     mod = find_mod_root()
     if mod:
