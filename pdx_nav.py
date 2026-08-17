@@ -1373,28 +1373,77 @@ def find_connected_clusters(nodes, edges, orphans):
     return clusters
 
 
-def tree_items(items, prefix, fmt):
-    """Print items as tree branches. fmt(item, is_last) returns the display string."""
-    for i, item in enumerate(items):
+KIND_COLORS = {
+    "effect": "\033[32m",       # green
+    "event": "\033[33m",        # yellow
+    "script_value": "\033[36m", # cyan
+    "on_action": "\033[91m",    # bright red
+    "static_modifiers": "\033[35m",           # magenta
+    "auto_modifiers": "\033[35m",
+    "modifier_type_definitions": "\033[35m",
+    "variable": "\033[2m",      # dim
+}
+C_RESET = "\033[0m"
+C_DIM = "\033[2m"
+_use_color = None
+
+
+def color_enabled():
+    global _use_color
+    if _use_color is None:
+        _use_color = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    return _use_color
+
+
+def c_kind(kind):
+    if not color_enabled():
+        return "", ""
+    return KIND_COLORS.get(kind, ""), C_RESET
+
+
+def dep_tree(name, edges, nodes, depth, seen, prefix, max_depth,
+             cycle_counts=None):
+    """Recursively print a dependency tree, collapsing repeat cycles."""
+    if cycle_counts is None:
+        cycle_counts = {}
+    targets = sorted(edges.get(name, set()))
+    new_targets = []
+    for t in targets:
+        if t in seen:
+            cycle_counts[t] = cycle_counts.get(t, 0) + 1
+        else:
+            new_targets.append(t)
+
+    items = new_targets
+    if not items and cycle_counts:
+        return
+
+    for i, t in enumerate(items):
         is_last = (i == len(items) - 1)
         connector = "└── " if is_last else "├── "
-        child_prefix = prefix + ("    " if is_last else "│   ")
-        print(f"{prefix}{connector}{fmt(item, child_prefix)}")
-
-
-def dep_tree(name, edges, nodes, depth, seen, prefix, max_depth):
-    """Recursively print a dependency tree."""
-    targets = sorted(edges.get(name, set()))
-    for i, t in enumerate(targets):
-        is_last = (i == len(targets) - 1)
-        connector = "└── " if is_last else "├── "
         kind = nodes[t][0] if t in nodes else "?"
-        cycle = " [cycle]" if t in seen else ""
-        print(f"{prefix}{connector}{t} ({kind}){cycle}")
-        if t not in seen and depth < max_depth:
+        cs, ce = c_kind(kind)
+        print(f"{prefix}{connector}{cs}{t}{ce} ({kind})")
+        if depth < max_depth:
             seen.add(t)
             child_prefix = prefix + ("    " if is_last else "│   ")
-            dep_tree(t, edges, nodes, depth + 1, seen, child_prefix, max_depth)
+            dep_tree(t, edges, nodes, depth + 1, seen, child_prefix,
+                     max_depth, cycle_counts)
+
+
+def print_cycles(cycle_counts, prefix):
+    """Print collapsed cycle summary."""
+    if not cycle_counts:
+        return
+    items = sorted(cycle_counts.items(), key=lambda x: -x[1])
+    dim_on = C_DIM if color_enabled() else ""
+    dim_off = C_RESET if color_enabled() else ""
+    count_label = f"{len(items)} cycles" if len(items) > 1 else "1 cycle"
+    total = sum(v for _, v in items)
+    names = ", ".join(f"{n} x{c}" if c > 1 else n for n, c in items[:5])
+    if len(items) > 5:
+        names += f" +{len(items)-5}"
+    print(f"{prefix}{dim_on}[{count_label}, {total} refs: {names}]{dim_off}")
 
 
 def cmd_graph(args, sources):
@@ -1432,13 +1481,16 @@ def cmd_graph(args, sources):
     engine_eps = entry_points - gui_refs
     gui_only_eps = gui_refs - engine_eps
 
+    if args.depth is None:
+        args.depth = 6 if args.name else 2
+
     in_edges = {n: set() for n in nodes}
     for src, targets in edges.items():
         for t in targets:
             if t in in_edges:
                 in_edges[t].add(src)
 
-    # --- Drill-down mode: show subtree rooted at a specific definition ---
+    # --- Drill-down mode ---
     if args.name:
         name = args.name
         if name not in nodes:
@@ -1446,16 +1498,33 @@ def cmd_graph(args, sources):
             suggest(name, sources)
             return 1
         kind = nodes[name][0]
-        loc = f"{nodes[name][1]}:{nodes[name][2]}-{nodes[name][3]}" if nodes[name][1] else ""
-        callers = sorted(in_edges.get(name, set()))
+        cs, ce = c_kind(kind)
+        loc = ""
+        if args.paths and nodes[name][1]:
+            loc = f"  {nodes[name][1]}:{nodes[name][2]}-{nodes[name][3]}"
         ep_tag = " [entry point]" if name in entry_points else ""
         gui_tag = " [gui]" if name in gui_refs else ""
-        print(f"{name} ({kind}){ep_tag}{gui_tag}  {loc}")
-        if callers:
-            print(f"├── called by: {', '.join(callers[:10])}"
-                  + (f" +{len(callers)-10}" if len(callers) > 10 else ""))
-        seen = {name}
-        dep_tree(name, edges, nodes, 1, seen, "", args.depth)
+        print(f"{cs}{name}{ce} ({kind}){ep_tag}{gui_tag}{loc}")
+
+        depth = args.depth
+
+        if args.up:
+            seen = {name}
+            cycle_counts = {}
+            dep_tree(name, in_edges, nodes, 1, seen, "", depth, cycle_counts)
+            print_cycles(cycle_counts, "")
+        else:
+            callers = sorted(in_edges.get(name, set()))
+            if callers:
+                dim = C_DIM if color_enabled() else ""
+                rst = C_RESET if color_enabled() else ""
+                print(f"├── {dim}called by: {', '.join(callers[:10])}"
+                      + (f" +{len(callers)-10}" if len(callers) > 10 else "")
+                      + rst)
+            seen = {name}
+            cycle_counts = {}
+            dep_tree(name, edges, nodes, 1, seen, "", depth, cycle_counts)
+            print_cycles(cycle_counts, "")
         return 0
 
     # collect sections
@@ -1492,12 +1561,18 @@ def cmd_graph(args, sources):
                 e_conn = "└── " if e_last else "├── "
                 e_pre = s_pre + ("    " if e_last else "│   ")
                 kind = nodes[ep][0]
-                loc = f"{nodes[ep][1]}:{nodes[ep][2]}-{nodes[ep][3]}"
-                print(f"{s_pre}{e_conn}{ep} ({kind})  {loc}")
+                cs, ce = c_kind(kind)
+                loc = ""
+                if args.paths:
+                    loc = f"  {nodes[ep][1]}:{nodes[ep][2]}-{nodes[ep][3]}"
+                print(f"{s_pre}{e_conn}{cs}{ep}{ce} ({kind}){loc}")
                 targets = edges.get(ep, set())
                 if targets:
                     seen = {ep}
-                    dep_tree(ep, edges, nodes, 1, seen, e_pre, args.depth)
+                    cycle_counts = {}
+                    dep_tree(ep, edges, nodes, 1, seen, e_pre, args.depth,
+                             cycle_counts)
+                    print_cycles(cycle_counts, e_pre)
 
         # --- GUI-REFERENCED ---
         elif section == "gui_referenced":
@@ -1515,11 +1590,12 @@ def cmd_graph(args, sources):
                 for ii, ep in enumerate(items):
                     i_last = (ii == len(items) - 1)
                     i_conn = "└── " if i_last else "├── "
+                    cs, ce = c_kind(kind)
                     targets = edges.get(ep, set())
                     dep_s = ""
                     if targets:
                         dep_s = f" -> {', '.join(sorted(targets))}"
-                    print(f"{k_pre}{i_conn}{ep}{dep_s}")
+                    print(f"{k_pre}{i_conn}{cs}{ep}{ce}{dep_s}")
 
         # --- CROSS-SYSTEM ---
         elif section == "cross_system":
@@ -1592,7 +1668,8 @@ def cmd_graph(args, sources):
                             arrow = ""
                             if targets_in:
                                 arrow = f" -> {', '.join(sorted(targets_in))}"
-                            print(f"{p_pre}{i_conn}{name} ({kind}){arrow}")
+                            cs, ce = c_kind(kind)
+                            print(f"{p_pre}{i_conn}{cs}{name}{ce} ({kind}){arrow}")
                     else:
                         print(f"{s_pre}{p_conn}Isolated ({len(data)})")
                         by_kind = {}
@@ -1604,12 +1681,15 @@ def cmd_graph(args, sources):
                             k_conn = "└── " if k_last else "├── "
                             k_pre = p_pre + ("    " if k_last else "│   ")
                             items = sorted(by_kind[kind])
+                            cs, ce = c_kind(kind)
                             print(f"{p_pre}{k_conn}{kind} ({len(items)})")
                             for ii, name in enumerate(items):
                                 i_last = (ii == len(items) - 1)
                                 i_conn = "└── " if i_last else "├── "
-                                loc = f"{nodes[name][1]}:{nodes[name][2]}"
-                                print(f"{k_pre}{i_conn}{name}  {loc}")
+                                loc = ""
+                                if args.paths:
+                                    loc = f"  {nodes[name][1]}:{nodes[name][2]}"
+                                print(f"{k_pre}{i_conn}{cs}{name}{ce}{loc}")
 
         # --- LEAF NODES ---
         elif section == "leaves":
@@ -1623,6 +1703,7 @@ def cmd_graph(args, sources):
                 k_conn = "└── " if k_last else "├── "
                 k_pre = s_pre + ("    " if k_last else "│   ")
                 items = sorted(by_kind[kind])
+                cs, ce = c_kind(kind)
                 print(f"{s_pre}{k_conn}{kind} ({len(items)})")
                 for ii, name in enumerate(items):
                     i_last = (ii == len(items) - 1)
@@ -1634,7 +1715,7 @@ def cmd_graph(args, sources):
                         caller_s = f"  <- {', '.join(shown)}"
                         if len(callers) > 5:
                             caller_s += f" +{len(callers)-5}"
-                    print(f"{k_pre}{i_conn}{name}{caller_s}")
+                    print(f"{k_pre}{i_conn}{cs}{name}{ce}{caller_s}")
 
     return 0
 
@@ -1689,8 +1770,10 @@ def main():
     gr = sub.add_parser("graph", help="Dependency graph of all mod definitions")
     gr.add_argument("name", nargs="?", default=None,
                     help="Drill into a specific definition's subtree")
-    gr.add_argument("--depth", type=int, default=4,
-                    help="Max tree depth for entry point expansion")
+    gr.add_argument("--up", action="store_true",
+                    help="Show upstream callers instead of downstream deps")
+    gr.add_argument("--depth", type=int, default=None,
+                    help="Max tree depth (default: 2 for full graph, 6 for drill-down)")
     gr.add_argument("--orphans-only", action="store_true",
                     help="Only show orphans section")
     gr.add_argument("--cross-limit", type=int, default=10,
@@ -1706,6 +1789,8 @@ def main():
                     "separated, e.g. --kind 'effect,event,script_value')")
     gr.add_argument("--vars", action="store_true",
                     help="Include variables, variable_maps, variable_lists")
+    gr.add_argument("--paths", action="store_true",
+                    help="Show file paths on definitions")
 
     sub.add_parser("rebuild", help="Force index rebuild")
 
