@@ -1531,12 +1531,7 @@ def cmd_graph(args, sources):
         sections.append("entry_points")
         if gui_only_eps:
             sections.append("gui_referenced")
-        sections.append("cross_system")
     sections.append("orphans")
-    if not args.orphans_only:
-        leaves = [n for n in reachable if not edges[n] and n not in entry_points]
-        if leaves:
-            sections.append("leaves")
 
     # root
     edge_count = sum(len(t) for t in edges.values())
@@ -1595,49 +1590,6 @@ def cmd_graph(args, sources):
                         dep_s = f" -> {', '.join(sorted(targets))}"
                     print(f"{k_pre}{i_conn}{cs}{ep}{ce}{dep_s}")
 
-        # --- CROSS-SYSTEM ---
-        elif section == "cross_system":
-            print(f"{s_conn}CROSS-SYSTEM CONNECTIONS")
-            cross = []
-            for name, targets in edges.items():
-                sk = nodes[name][0]
-                for t in targets:
-                    tk = nodes[t][0]
-                    if sk != tk:
-                        cross.append((sk, name, tk, t))
-            pairs = []
-            seen_pairs = set()
-            for sk, sn, tk, tn in sorted(cross):
-                pair = (sk, tk)
-                if pair not in seen_pairs:
-                    seen_pairs.add(pair)
-                    conns = [(s, t) for s_k, s, t_k, t in cross
-                             if (s_k, t_k) == pair]
-                    pairs.append((sk, tk, conns))
-            for pi, (sk, tk, conns) in enumerate(pairs):
-                p_last = (pi == len(pairs) - 1)
-                p_conn = "└── " if p_last else "├── "
-                p_pre = s_pre + ("    " if p_last else "│   ")
-                scs, sce = c_kind(sk)
-                tcs, tce = c_kind(tk)
-                print(f"{s_pre}{p_conn}{scs}{sk}{sce} -> {tcs}{tk}{tce}  ({len(conns)})")
-                show = conns[:args.cross_limit]
-                extra = len(conns) - len(show)
-                if extra:
-                    show_items = show + [None]
-                else:
-                    show_items = show
-                for ci, c in enumerate(show_items):
-                    c_last = (ci == len(show_items) - 1)
-                    c_conn = "└── " if c_last else "├── "
-                    if c is None:
-                        print(f"{p_pre}{c_conn}... {extra} more")
-                    else:
-                        sk2 = nodes[c[0]][0] if c[0] in nodes else sk
-                        tk2 = nodes[c[1]][0] if c[1] in nodes else tk
-                        s2, se2 = c_kind(sk2)
-                        t2, te2 = c_kind(tk2)
-                        print(f"{p_pre}{c_conn}{s2}{c[0]}{se2} -> {t2}{c[1]}{te2}")
 
         # --- ORPHANS ---
         elif section == "orphans":
@@ -1694,32 +1646,6 @@ def cmd_graph(args, sources):
                                 if args.paths:
                                     loc = f"  {nodes[name][1]}:{nodes[name][2]}"
                                 print(f"{k_pre}{i_conn}{cs}{name}{ce}{loc}")
-
-        # --- LEAF NODES ---
-        elif section == "leaves":
-            print(f"{s_conn}LEAF NODES ({len(leaves)})")
-            by_kind = {}
-            for name in leaves:
-                by_kind.setdefault(nodes[name][0], []).append(name)
-            kinds = sorted(by_kind)
-            for ki, kind in enumerate(kinds):
-                k_last = (ki == len(kinds) - 1)
-                k_conn = "└── " if k_last else "├── "
-                k_pre = s_pre + ("    " if k_last else "│   ")
-                items = sorted(by_kind[kind])
-                cs, ce = c_kind(kind)
-                print(f"{s_pre}{k_conn}{kind} ({len(items)})")
-                for ii, name in enumerate(items):
-                    i_last = (ii == len(items) - 1)
-                    i_conn = "└── " if i_last else "├── "
-                    callers = sorted(in_edges.get(name, set()))
-                    caller_s = ""
-                    if callers:
-                        shown = callers[:5]
-                        caller_s = f"  <- {', '.join(shown)}"
-                        if len(callers) > 5:
-                            caller_s += f" +{len(callers)-5}"
-                    print(f"{k_pre}{i_conn}{cs}{name}{ce}{caller_s}")
 
     return 0
 
@@ -1780,8 +1706,6 @@ def main():
                     help="Max tree depth (default: 2 for full graph, 6 for drill-down)")
     gr.add_argument("--orphans-only", action="store_true",
                     help="Only show orphans section")
-    gr.add_argument("--cross-limit", type=int, default=10,
-                    help="Max connections shown per cross-system pair")
     gr.add_argument("--include-loc", action="store_true",
                     help="Include localization keys")
     gr.add_argument("--include-gui", action="store_true",
