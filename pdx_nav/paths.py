@@ -1,23 +1,9 @@
 import hashlib
-import os
 from pathlib import Path
 
-from .constants import (CODE_EXTS, DEFAULT_VANILLA_ROOT, EXCLUDE_PARTS,
-                        EXCLUDE_SUBTREES, SCAN_TOPDIRS, VANILLA_CACHE_DIR)
-
-
-def find_mod_root(start=None):
-    p = (start or Path.cwd()).resolve()
-    while p != p.parent:
-        if (p / ".metadata").is_dir():
-            return p
-        p = p.parent
-    return None
-
-
-def vanilla_root():
-    env = os.environ.get("PDX_GAME_ROOT")
-    return Path(env) if env else DEFAULT_VANILLA_ROOT
+from pdx_common.paths import find_mod_root, vanilla_root  # noqa: F401
+from .constants import (CODE_EXTS, EXCLUDE_PARTS, EXCLUDE_SUBTREES,
+                        SCAN_TOPDIRS, VANILLA_CACHE_DIR)
 
 
 def cache_dir_for(source, root):

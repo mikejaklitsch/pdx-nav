@@ -1,8 +1,6 @@
 import re
 from pathlib import Path
 
-DEFAULT_VANILLA_ROOT = Path(
-    "/mnt/d/Program Files (x86)/Steam/steamapps/common/Europa Universalis V/game")
 VANILLA_CACHE_DIR = Path.home() / ".cache" / "pdx-nav"
 
 SCAN_TOPDIRS = ("in_game", "main_menu", "loading_screen")
