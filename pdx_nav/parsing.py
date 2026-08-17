@@ -1,4 +1,4 @@
-from .constants import DEF_RE, GUI_DEF_RE, KIND_DISPLAY, LOC_DEF_RE
+from .constants import DEF_RE, GUI_DEF_RE, GUI_VAR_RE, KIND_DISPLAY, LOC_DEF_RE
 from .scanner import split_line
 
 
@@ -37,8 +37,10 @@ def parse_defs(text, rel):
         code, _, masked, in_string = split_line(line, in_string)
         if depth == 0:
             if kind == "gui":
-                m = GUI_DEF_RE.match(code)
+                m = GUI_VAR_RE.match(code)
                 if m:
+                    defs.append((f"@{m.group(1)}", "gui_var", i, i, ""))
+                elif (m := GUI_DEF_RE.match(code)):
                     pending = (m.group(2), m.group(1), "", i)
             else:
                 m = DEF_RE.match(code)

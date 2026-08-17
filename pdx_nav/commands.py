@@ -65,6 +65,56 @@ def cmd_show(args, sources):
     return 0
 
 
+def cmd_context(args, sources):
+    """Show a definition with its parent hierarchy (indentation-based)."""
+    hit = pick_def(args.name, sources, args.source)
+    if not hit:
+        print(f"No definition found for '{args.name}'")
+        suggest(args.name, sources)
+        return 1
+    src, d = hit
+    name, kind, fi, s, e, flag = d
+    lines = src.read_file(fi).split("\n")
+    target_line = s - 1
+    indent_at_target = len(lines[target_line]) - len(lines[target_line].lstrip())
+
+    parents = []
+    for i in range(target_line - 1, -1, -1):
+        line = lines[i]
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent < indent_at_target:
+            parents.append((i + 1, line.rstrip()))
+            indent_at_target = indent
+            if indent == 0:
+                break
+    parents.reverse()
+
+    print(f"# {src.files[fi]}:{s}-{e}  ({src.name} {kind})")
+    if parents:
+        print("# Hierarchy:")
+        for line_no, text in parents:
+            print(f"#   L{line_no}: {text}")
+        print()
+
+    block = lines[s - 1:e]
+    maxn = args.lines
+    if len(block) <= maxn:
+        for i, line in enumerate(block):
+            print(f"{s + i:5d}  {line}")
+    else:
+        head = maxn * 2 // 3
+        tail = maxn - head
+        for i in range(head):
+            print(f"{s + i:5d}  {block[i]}")
+        print(f"       ... ({len(block) - head - tail} lines omitted; "
+              f"full span {s}-{e}) ...")
+        for i in range(len(block) - tail, len(block)):
+            print(f"{s + i:5d}  {block[i]}")
+    return 0
+
+
 def cmd_refs(args, sources):
     status = 0
     for name in args.names:

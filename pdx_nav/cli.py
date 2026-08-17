@@ -1,8 +1,8 @@
 import argparse
 import sys
 
-from .commands import (cmd_def, cmd_show, cmd_refs, cmd_callers, cmd_stack,
-                       cmd_vars, cmd_list, cmd_grep, cmd_rebuild)
+from .commands import (cmd_def, cmd_show, cmd_context, cmd_refs, cmd_callers,
+                       cmd_stack, cmd_vars, cmd_list, cmd_grep, cmd_rebuild)
 from .graph import cmd_graph
 from .source import load_sources
 
@@ -22,6 +22,12 @@ def main():
     s.add_argument("-n", "--lines", type=int, default=120)
     s.add_argument("--vanilla", dest="source", action="store_const", const="vanilla")
     s.add_argument("--mod", dest="source", action="store_const", const="mod")
+
+    ctx = sub.add_parser("context", help="Show definition with parent hierarchy")
+    ctx.add_argument("name")
+    ctx.add_argument("-n", "--lines", type=int, default=60)
+    ctx.add_argument("--vanilla", dest="source", action="store_const", const="vanilla")
+    ctx.add_argument("--mod", dest="source", action="store_const", const="mod")
 
     r = sub.add_parser("refs", help="Find all references")
     r.add_argument("names", nargs="+")
@@ -95,9 +101,10 @@ def main():
             args.source = matches[0].name
 
     return {
-        "def": cmd_def, "show": cmd_show, "refs": cmd_refs,
-        "callers": cmd_callers, "stack": cmd_stack, "vars": cmd_vars,
-        "list": cmd_list, "grep": cmd_grep, "graph": cmd_graph,
+        "def": cmd_def, "show": cmd_show, "context": cmd_context,
+        "refs": cmd_refs, "callers": cmd_callers, "stack": cmd_stack,
+        "vars": cmd_vars, "list": cmd_list, "grep": cmd_grep,
+        "graph": cmd_graph,
     }[args.cmd](args, sources)
 
 
