@@ -86,6 +86,9 @@ def main():
 
     ol = sub.add_parser("outline", help="Show nested structure of a .gui file")
     ol.add_argument("file", help="Path to a .gui file")
+    ol.add_argument("--kind", action="append", metavar="KIND",
+                    help="Only show these kinds (types, type, template, "
+                    "local_template, block, blockoverride, @var)")
 
     rn = sub.add_parser("rename", help="Rename a symbol across all mod files")
     rn.add_argument("old", help="Current name")
