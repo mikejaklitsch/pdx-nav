@@ -13,13 +13,23 @@ Usage:
     pdx-nav stack <name>              Transitive caller tree up to engine entry points
     pdx-nav vars <name>               Variable write/read sites
     pdx-nav list <glob>               List definitions matching a glob (--kind to filter)
+    pdx-nav list --file <path>        List all definitions in one file (file order)
+    pdx-nav grep <pattern>            Full-text search over indexed symbol names
+    pdx-nav graph                      Dependency graph: trees, orphans, cross-system edges
     pdx-nav rebuild                   Force index + corpus rebuild
 
+    pdx-nav --at 1.2.5 def <name>    Navigate vanilla at a specific version
+
+Vanilla source: when a vanilla-tracker bare git repo is found ($PDX_VANILLA_REPO
+or <mod-parent>/vanilla-tracker/repo.git), it is used instead of the live game
+install. --at <version> selects a tracker tag; without it, the latest tag is
+used. Falls back to the game install when no tracker is found.
+
 Architecture: definitions and block spans are indexed once and cached
-(mod: <mod>/.claude/pdx_nav/, vanilla: ~/.cache/pdx-nav/, invalidated by
-mtime hash). Reference queries run ripgrep over a locally cached corpus
-copy (fast even though the game lives on a slow /mnt drive), then each hit
-is classified (code/string/comment) and enriched with its enclosing block.
+(mod: <mod>/.claude/pdx_nav/, vanilla: ~/.cache/pdx-nav/tracker-<version>/,
+invalidated by commit hash). Reference queries run ripgrep over a locally
+cached corpus copy, then each hit is classified (code/string/comment) and
+enriched with its enclosing block.
 """
 
 import argparse
@@ -67,6 +77,10 @@ VAR_WRITE_FAMILY = re.compile(
     r'|remove_from|cmf_change)_?\w*variable\w*\s*=')
 
 ENTRY_KINDS = {"on_action"}
+ENGINE_EVALUATED_KINDS = {"on_action", "auto_modifiers", "static_modifiers",
+                          "pop_types", "location_ranks", "modifier_type_definitions",
+                          "game_concepts", "modifier_icons", "data_binding",
+                          "types"}
 
 
 # --- shared scanner (same semantics as pdx-tag / pdx-format --brace) ---
@@ -295,6 +309,9 @@ class Source:
         self.name = name
         self.root = root
         self.idx, self.corpus = build_index(name, root)
+        self._init_lookups()
+
+    def _init_lookups(self):
         self.files = self.idx["files"]
         self.by_name = {}
         self.spans_by_file = {}
@@ -303,6 +320,10 @@ class Source:
             self.spans_by_file.setdefault(d[2], []).append((d[3], d[4], d[0], d[1]))
         for spans in self.spans_by_file.values():
             spans.sort()
+
+    def read_file(self, fi):
+        path = self.root / self.files[fi]
+        return path.read_text(encoding="utf-8-sig", errors="replace")
 
     def enclosing(self, file_i, line):
         spans = self.spans_by_file.get(file_i, [])
@@ -342,6 +363,219 @@ class Source:
         return hits
 
 
+# --- vanilla-tracker (bare git repo) ---
+
+def find_vanilla_tracker(mod_root=None):
+    """Discover the vanilla-tracker bare git repo.
+    Precedence: $PDX_VANILLA_REPO > <mod-parent>/vanilla-tracker/repo.git."""
+    env = os.environ.get("PDX_VANILLA_REPO")
+    if env:
+        p = Path(env).resolve()
+        if p.exists():
+            return p
+
+    if mod_root:
+        candidate = mod_root.parent / "vanilla-tracker" / "repo.git"
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def tracker_tags(repo):
+    """Return {tag: commit_hash} from the bare repo."""
+    try:
+        r = subprocess.run(
+            ["git", f"--git-dir={repo}", "tag", "-l",
+             "--format=%(refname:short) %(objectname:short)"],
+            capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return {}
+    tags = {}
+    for line in r.stdout.strip().split("\n"):
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            tags[parts[0]] = parts[1]
+    return tags
+
+
+def tracker_latest_tag(repo):
+    """Return the most recent tag (by commit date)."""
+    try:
+        r = subprocess.run(
+            ["git", f"--git-dir={repo}", "tag", "--sort=-creatordate"],
+            capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    for line in r.stdout.strip().split("\n"):
+        if line.strip():
+            return line.strip()
+    return None
+
+
+def tracker_resolve_ref(repo, version):
+    """Resolve a version string to a git ref. Tries exact tag first, then
+    as a raw commit/branch ref. Returns None with a hint on failure."""
+    tags = tracker_tags(repo)
+    if version in tags:
+        return version
+    # try as a raw ref
+    try:
+        r = subprocess.run(
+            ["git", f"--git-dir={repo}", "rev-parse", "--verify",
+             f"{version}^{{commit}}"],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            return version
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    import difflib
+    close = difflib.get_close_matches(version, list(tags.keys()), n=3, cutoff=0.5)
+    hint = f"; did you mean: {', '.join(close)}" if close else \
+        f"; available: {', '.join(sorted(tags.keys()))}"
+    print(f"Error: unknown version '{version}'{hint}", file=sys.stderr)
+    return None
+
+
+def tracker_collect_files(repo, ref):
+    """List files from a git tree, filtered like collect_files."""
+    try:
+        r = subprocess.run(
+            ["git", f"--git-dir={repo}", "ls-tree", "-r", "--name-only", ref],
+            capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+    files = []
+    for line in r.stdout.split("\n"):
+        rel = line.strip()
+        if not rel:
+            continue
+        parts = rel.split("/")
+        if parts[0] not in SCAN_TOPDIRS:
+            continue
+        ext = Path(rel).suffix.lower()
+        if ext not in CODE_EXTS and ext != ".yml":
+            continue
+        if EXCLUDE_PARTS.intersection(parts):
+            continue
+        if any(sub in rel for sub in EXCLUDE_SUBTREES):
+            continue
+        files.append(rel)
+    return sorted(files)
+
+
+def tracker_read_file(repo, ref, rel):
+    """Read a single file from the bare repo at the given ref."""
+    try:
+        r = subprocess.run(
+            ["git", f"--git-dir={repo}", "show", f"{ref}:{rel}"],
+            capture_output=True, timeout=30)
+        if r.returncode != 0:
+            return None
+        raw = r.stdout
+        if raw[:3] == b'\xef\xbb\xbf':
+            raw = raw[3:]
+        return raw.decode("utf-8", errors="replace")
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def build_tracker_index(repo, ref, version_label):
+    """Build or load a cached index for a vanilla-tracker ref."""
+    cache = VANILLA_CACHE_DIR / f"tracker-{version_label}"
+    cache.mkdir(parents=True, exist_ok=True)
+    idx_path = cache / "index.json"
+    corpus_path = cache / "corpus.txt"
+
+    # resolve ref to full hash for cache validity
+    try:
+        r = subprocess.run(
+            ["git", f"--git-dir={repo}", "rev-parse", ref],
+            capture_output=True, text=True, timeout=10)
+        commit_hash = r.stdout.strip() if r.returncode == 0 else ref
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        commit_hash = ref
+
+    if idx_path.exists() and corpus_path.exists():
+        try:
+            idx = json.loads(idx_path.read_text())
+            if idx.get("commit") == commit_hash:
+                return idx, corpus_path
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    files = tracker_collect_files(repo, ref)
+    sys.stderr.write(
+        f"pdx-nav: indexing vanilla-tracker {version_label} ({len(files)} files)...\n")
+
+    # batch-read all files in one git archive + tar, much faster than N git-show calls
+    import tarfile
+    import io
+    file_contents = {}
+    if files:
+        try:
+            r = subprocess.run(
+                ["git", f"--git-dir={repo}", "archive", ref] + files,
+                capture_output=True, timeout=120)
+            if r.returncode == 0:
+                tf = tarfile.open(fileobj=io.BytesIO(r.stdout))
+                for member in tf.getmembers():
+                    if not member.isfile():
+                        continue
+                    raw = tf.extractfile(member).read()
+                    if raw[:3] == b'\xef\xbb\xbf':
+                        raw = raw[3:]
+                    file_contents[member.name] = raw.decode("utf-8", errors="replace")
+                tf.close()
+        except (subprocess.TimeoutExpired, FileNotFoundError, tarfile.TarError):
+            pass
+
+    # fallback to individual reads for any files not in archive
+    for rel in files:
+        if rel not in file_contents:
+            text = tracker_read_file(repo, ref, rel)
+            if text is not None:
+                file_contents[rel] = text
+
+    defs = []
+    corpus_lines = []
+    for fi, rel in enumerate(files):
+        text = file_contents.get(rel)
+        if text is None:
+            continue
+        for (name, kind, start, end, flag) in parse_defs(text, rel):
+            defs.append([name, kind, fi, start, end, flag])
+        if Path(rel).suffix.lower() in CODE_EXTS or rel.endswith(".yml"):
+            for ln, line in enumerate(text.split("\n"), 1):
+                if line.strip():
+                    corpus_lines.append(f"{fi}:{ln}:{line}")
+
+    idx = {"commit": commit_hash, "repo": str(repo), "ref": ref,
+           "version": version_label, "files": files, "defs": defs}
+    idx_path.write_text(json.dumps(idx, separators=(",", ":")))
+    corpus_path.write_text("\n".join(corpus_lines), encoding="utf-8")
+    return idx, corpus_path
+
+
+class GitSource(Source):
+    """A Source backed by a bare git repo (vanilla-tracker) at a specific ref."""
+
+    def __init__(self, repo, ref, version_label):
+        self.name = f"vanilla@{version_label}"
+        self.root = None
+        self._repo = repo
+        self._ref = ref
+        self._version = version_label
+        self.idx, self.corpus = build_tracker_index(repo, ref, version_label)
+        self._init_lookups()
+
+    def read_file(self, fi):
+        text = tracker_read_file(self._repo, self._ref, self.files[fi])
+        return text if text is not None else ""
+
+
 _SEARCHER = None
 
 
@@ -366,14 +600,39 @@ def resolve_searcher():
     return _SEARCHER
 
 
-def load_sources(need_mod=True):
+def load_sources(need_mod=True, at_version=None):
     sources = []
     mod = find_mod_root()
     if mod and need_mod:
         sources.append(Source("mod", mod))
-    v = vanilla_root()
-    if v.is_dir():
-        sources.append(Source("vanilla", v))
+
+    # prefer vanilla-tracker when available (faster than /mnt, version-taggable)
+    tracker = find_vanilla_tracker(mod)
+    if tracker:
+        version = at_version
+        if not version:
+            version = tracker_latest_tag(tracker)
+        if version:
+            ref = tracker_resolve_ref(tracker, version)
+            if ref is None:
+                sys.exit(1)
+            sources.append(GitSource(tracker, ref, version))
+        else:
+            sys.stderr.write("pdx-nav: vanilla-tracker has no tags, "
+                             "falling back to game install\n")
+            v = vanilla_root()
+            if v.is_dir():
+                sources.append(Source("vanilla", v))
+    else:
+        if at_version:
+            print("Error: --at requires a vanilla-tracker repo. None found.\n"
+                  "  Set $PDX_VANILLA_REPO or place repo.git at "
+                  "<mod-parent>/vanilla-tracker/repo.git", file=sys.stderr)
+            sys.exit(1)
+        v = vanilla_root()
+        if v.is_dir():
+            sources.append(Source("vanilla", v))
+
     if not sources:
         print("Error: no mod root (.metadata/) found and vanilla root missing",
               file=sys.stderr)
@@ -467,8 +726,7 @@ def cmd_show(args, sources):
         return 1
     src, d = hit
     name, kind, fi, s, e, flag = d
-    path = src.root / src.files[fi]
-    lines = path.read_text(encoding="utf-8-sig", errors="replace").split("\n")
+    lines = src.read_file(fi).split("\n")
     block = lines[s - 1:e]
     print(f"# {src.files[fi]}:{s}-{e}  ({src.name} {kind}, {len(block)} lines)")
     maxn = args.lines
@@ -669,10 +927,8 @@ def cmd_vars(args, sources):
                 writes.append((src, fi, ln, text.strip()))
             else:
                 # opener may be on a nearby earlier line
-                path = src.root / src.files[fi]
                 try:
-                    lines = path.read_text(encoding="utf-8-sig",
-                                           errors="replace").split("\n")
+                    lines = src.read_file(fi).split("\n")
                 except OSError:
                     continue
                 window = "\n".join(lines[max(0, ln - 5):ln - 1])
@@ -700,7 +956,15 @@ def cmd_vars(args, sources):
 
 
 def cmd_list(args, sources):
-    pat = args.pattern.lower()
+    # Dispatch to file-listing mode if --file given
+    if args.file:
+        return cmd_list_file(args, sources)
+
+    pat = args.pattern
+    if not pat:
+        print("Error: pattern required (or use --file <path>)")
+        return 1
+    pat = pat.lower()
     rows = []
     for src in sources:
         for d in src.idx["defs"]:
@@ -723,27 +987,523 @@ def cmd_list(args, sources):
     return 0
 
 
-def cmd_rebuild(_args, _sources):
+def cmd_grep(args, sources):
+    pattern = args.pattern
+    try:
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        # Fall back to literal substring match if not a valid regex
+        rx = re.compile(re.escape(pattern), re.IGNORECASE)
+
+    cap = args.limit
+    rows = []
+    for src in sources:
+        for d in src.idx["defs"]:
+            if rx.search(d[0]):
+                if args.kind and d[1] != args.kind:
+                    continue
+                rows.append((d[1], d[0], src, d))
+
+    if not rows:
+        print(f"No indexed symbols matching '{pattern}'")
+        suggest(pattern, sources)
+        return 1
+
+    rows.sort(key=lambda r: (r[0], r[1]))
+    cur = None
+    shown = 0
+    for kind, name, src, d in rows:
+        if shown >= cap:
+            remaining = len(rows) - shown
+            print(f"\n+{remaining} more (use -n {len(rows)} to see all)")
+            break
+        if kind != cur:
+            cur = kind
+            print(f"\n[{kind}]")
+        print(f"  {name}  — {src.files[d[2]]}:{d[3]}-{d[4]} ({src.name})")
+        shown += 1
+    return 0
+
+
+def resolve_file_path(path_str, sources):
+    """Resolve a file path (absolute, cwd-relative, or root-relative) to
+    [(src, file_index)] pairs. Accepts mod-relative or vanilla-relative
+    paths like 'in_game/common/generic_actions/italian_wars.txt'."""
+    results = []
+    # Normalize to forward slashes
+    path_str = path_str.replace("\\", "/")
+
+    for src in sources:
+        # Try as absolute path
+        try:
+            p = Path(path_str).resolve()
+            rel = p.relative_to(src.root).as_posix()
+            if rel in src.files:
+                fi = src.files.index(rel)
+                results.append((src, fi))
+                continue
+        except (ValueError, OSError):
+            pass
+
+        # Try as cwd-relative
+        try:
+            p = (Path.cwd() / path_str).resolve()
+            rel = p.relative_to(src.root).as_posix()
+            if rel in src.files:
+                fi = src.files.index(rel)
+                results.append((src, fi))
+                continue
+        except (ValueError, OSError):
+            pass
+
+        # Try as root-relative (e.g. in_game/common/...)
+        norm = path_str.lstrip("/")
+        if norm in src.files:
+            fi = src.files.index(norm)
+            results.append((src, fi))
+
+    return results
+
+
+def cmd_list_file(args, sources):
+    """List all definitions in a specific file, in file order."""
+    matches = resolve_file_path(args.file, sources)
+    if not matches:
+        print(f"File not found in index: '{args.file}'")
+        print("Searched mod and vanilla roots for matching paths.")
+        return 1
+
+    for src, fi in matches:
+        spans = src.spans_by_file.get(fi, [])
+        if args.kind:
+            spans = [(s, e, name, kind) for s, e, name, kind in spans
+                     if kind == args.kind]
+        if args.pattern:
+            pat = args.pattern.lower()
+            spans = [(s, e, name, kind) for s, e, name, kind in spans
+                     if fnmatch.fnmatch(name.lower(), pat)]
+        print(f"# {src.files[fi]} ({src.name}, {len(spans)} definitions)")
+        for start, end, name, kind in spans:
+            loc = f"L{start}-{end}" if end > start else f"L{start}"
+            print(f"  {kind:<18} {name:<40} {loc}")
+    return 0
+
+
+def cmd_rebuild(args, _sources):
     mod = find_mod_root()
-    targets = []
     if mod:
-        targets.append(("mod", mod))
-    targets.append(("vanilla", vanilla_root()))
-    for source, root in targets:
-        cache = cache_dir_for(source, root)
+        cache = cache_dir_for("mod", mod)
         for f in ("index.json", "corpus.txt"):
             p = cache / f
             if p.exists():
                 p.unlink()
-        idx, _ = build_index(source, root)
-        print(f"{source}: {len(idx['defs'])} definitions from "
+        idx, _ = build_index("mod", mod)
+        print(f"mod: {len(idx['defs'])} definitions from "
               f"{len(idx['files'])} files")
+
+    tracker = find_vanilla_tracker(mod)
+    if tracker:
+        version = getattr(args, "at", None) or tracker_latest_tag(tracker)
+        if version:
+            cache = VANILLA_CACHE_DIR / f"tracker-{version}"
+            if cache.exists():
+                for f in ("index.json", "corpus.txt"):
+                    p = cache / f
+                    if p.exists():
+                        p.unlink()
+            idx, _ = build_tracker_index(tracker, version, version)
+            print(f"vanilla@{version}: {len(idx['defs'])} definitions from "
+                  f"{len(idx['files'])} files")
+    else:
+        v = vanilla_root()
+        if v.is_dir():
+            cache = cache_dir_for("vanilla", v)
+            for f in ("index.json", "corpus.txt"):
+                p = cache / f
+                if p.exists():
+                    p.unlink()
+            idx, _ = build_index("vanilla", v)
+            print(f"vanilla: {len(idx['defs'])} definitions from "
+                  f"{len(idx['files'])} files")
+    return 0
+
+
+WORD_RE = re.compile(r'[A-Za-z_@][\w.]*')
+GRAPH_EXCLUDE_KINDS = {"loc", "gui", "template", "type", "types",
+                        "local_template", "map_modes"}
+GRAPH_TEMPLATE_RE = re.compile(
+    r'(?:[A-Za-z_][\w.]*)?'     # optional static prefix
+    r'(?:\$\w+\$[\w.]*)'        # first $param$ segment
+    r'(?:[\w.]*\$\w+\$[\w.]*)*' # additional segments
+)
+GRAPH_NOISE_NAMES = {"namespace", "l_english"}
+LOC_CONVENTION_PREFIXES = (
+    "MODIFIER_TYPE_NAME_", "MODIFIER_TYPE_DESC_",
+    "STATIC_MODIFIER_NAME_", "STATIC_MODIFIER_DESC_",
+    "game_concept_", "mapmode_", "MAPMODE_",
+)
+
+
+def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None):
+    """Build a directed graph of mod definitions.
+    Returns (nodes, edges, entry_points) where:
+      nodes = {name: (kind, file, start, end)}
+      edges = {name: set(target_names)}  (name references target)
+      entry_points = set(names) that the engine evaluates directly
+    """
+    skip = exclude_kinds or set()
+    nodes = {}
+    for d in mod_src.idx["defs"]:
+        name, kind, fi, start, end, flag = d
+        if name in GRAPH_NOISE_NAMES:
+            continue
+        if include_kinds and kind not in include_kinds:
+            continue
+        if kind in skip:
+            continue
+        nodes[name] = (kind, mod_src.files[fi], start, end)
+
+    name_set = set(nodes.keys())
+    list_names = {n for n, (k, *_) in nodes.items() if k == "scripted_lists"}
+    LIST_PREFIXES = ("every_", "ordered_", "any_", "random_")
+    edges = {n: set() for n in nodes}
+    entry_points = set()
+
+    file_cache = {}
+    for d in mod_src.idx["defs"]:
+        name, kind, fi, start, end, flag = d
+        if name not in nodes:
+            continue
+        if kind in ENGINE_EVALUATED_KINDS:
+            entry_points.add(name)
+        if kind == "loc" and any(name.startswith(p) for p in LOC_CONVENTION_PREFIXES):
+            entry_points.add(name)
+
+        if fi not in file_cache:
+            try:
+                file_cache[fi] = mod_src.read_file(fi).split("\n")
+            except OSError:
+                file_cache[fi] = []
+        lines = file_cache[fi]
+        is_gui = mod_src.files[fi].endswith(".gui")
+        block_tokens = set()
+        template_tokens = set()
+        in_string = False
+        for line in lines[start - 1:end]:
+            code, _, masked, in_string = split_line(line, in_string)
+            if is_gui:
+                block_tokens.update(WORD_RE.findall(code))
+            else:
+                block_tokens.update(WORD_RE.findall(masked))
+            if "$" in code:
+                template_tokens.update(GRAPH_TEMPLATE_RE.findall(code))
+        block_tokens.discard(name)
+        matched = block_tokens & name_set
+        for tok in block_tokens - name_set:
+            if list_names:
+                for pfx in LIST_PREFIXES:
+                    if tok.startswith(pfx):
+                        base = tok[len(pfx):]
+                        if base in list_names:
+                            matched.add(base)
+        for tok in template_tokens:
+            if re.fullmatch(r'\$\w+\$', tok):
+                continue
+            prefix = tok.split("$", 1)[0]
+            for candidate in name_set:
+                if candidate.startswith(prefix) and template_matches(tok, candidate):
+                    matched.add(candidate)
+        edges[name] = matched
+
+    gui_refs = scan_gui_references(mod_src, name_set)
+    entry_points.update(gui_refs)
+
+    return nodes, edges, entry_points, gui_refs
+
+
+def scan_gui_references(mod_src, name_set):
+    """Scan .gui files and excluded-but-scriptful files (map_modes) for
+    references to script definitions. GUI data-binding lives inside strings,
+    so we scan the full code portion (including string interiors) for tokens."""
+    gui_referenced = set()
+    for fi, rel in enumerate(mod_src.files):
+        if not rel.endswith(".gui"):
+            continue
+        try:
+            text = mod_src.read_file(fi)
+        except OSError:
+            continue
+        in_string = False
+        for line in text.split("\n"):
+            code, _, _, in_string = split_line(line, in_string)
+            tokens = set(WORD_RE.findall(code))
+            gui_referenced.update(tokens & name_set)
+
+    if mod_src.root:
+        for top in SCAN_TOPDIRS:
+            mm = mod_src.root / top / "gfx" / "map" / "map_modes"
+            if not mm.is_dir():
+                continue
+            for f in sorted(mm.glob("*.txt")):
+                try:
+                    text = f.read_text(encoding="utf-8-sig", errors="replace")
+                except OSError:
+                    continue
+                in_string = False
+                for line in text.split("\n"):
+                    code, _, _, in_string = split_line(line, in_string)
+                    tokens = set(WORD_RE.findall(code))
+                    gui_referenced.update(tokens & name_set)
+
+    return gui_referenced
+
+
+def compute_reachability(nodes, edges, entry_points):
+    """BFS from entry points. Returns (reachable, components).
+    components = [(entry_name, set_of_reachable_nodes)]"""
+    all_reachable = set()
+    components = []
+
+    reverse = {n: set() for n in nodes}
+    for src, targets in edges.items():
+        for t in targets:
+            if t in reverse:
+                reverse[t].add(src)
+
+    for ep in sorted(entry_points):
+        visited = set()
+        queue = [ep]
+        while queue:
+            cur = queue.pop(0)
+            if cur in visited:
+                continue
+            visited.add(cur)
+            for t in edges.get(cur, set()):
+                if t not in visited:
+                    queue.append(t)
+        if len(visited) > 1 or edges.get(ep):
+            components.append((ep, visited))
+        all_reachable.update(visited)
+
+    orphans = set(nodes.keys()) - all_reachable
+    return all_reachable, components, orphans
+
+
+def find_connected_clusters(nodes, edges, orphans):
+    """Among orphans, find clusters that reference each other."""
+    undirected = {n: set() for n in orphans}
+    for n in orphans:
+        for t in edges.get(n, set()):
+            if t in orphans:
+                undirected[n].add(t)
+                undirected[t].add(n)
+
+    visited = set()
+    clusters = []
+    for n in sorted(orphans):
+        if n in visited:
+            continue
+        cluster = set()
+        queue = [n]
+        while queue:
+            cur = queue.pop(0)
+            if cur in visited:
+                continue
+            visited.add(cur)
+            cluster.add(cur)
+            for t in undirected.get(cur, set()):
+                if t not in visited:
+                    queue.append(t)
+        clusters.append(cluster)
+    return clusters
+
+
+def print_tree(name, edges, nodes, depth, seen, prefix, max_depth):
+    """Recursively print a dependency tree."""
+    targets = sorted(edges.get(name, set()))
+    for i, t in enumerate(targets):
+        is_last = (i == len(targets) - 1)
+        connector = "└── " if is_last else "├── "
+        kind = nodes[t][0] if t in nodes else "?"
+        cycle = " [cycle]" if t in seen else ""
+        print(f"{prefix}{connector}{t} ({kind}){cycle}")
+        if t not in seen and depth < max_depth:
+            seen.add(t)
+            child_prefix = prefix + ("    " if is_last else "│   ")
+            print_tree(t, edges, nodes, depth + 1, seen, child_prefix, max_depth)
+
+
+def cmd_graph(args, sources):
+    mod_src = None
+    for s in sources:
+        if s.name == "mod":
+            mod_src = s
+            break
+    if not mod_src:
+        print("Error: no mod root found")
+        return 1
+
+    sys.stderr.write("pdx-nav: building dependency graph...\n")
+    exclude = set(GRAPH_EXCLUDE_KINDS) if not args.all else set()
+    if args.include_loc:
+        exclude.discard("loc")
+    if args.include_gui:
+        exclude -= {"gui", "template", "type", "types", "local_template"}
+    nodes, edges, entry_points, gui_refs = build_graph(
+        mod_src, sources, exclude_kinds=exclude)
+    reachable, components, orphans = compute_reachability(nodes, edges, entry_points)
+
+    engine_eps = entry_points - gui_refs
+    gui_only_eps = gui_refs - engine_eps
+
+    in_edges = {n: set() for n in nodes}
+    for src, targets in edges.items():
+        for t in targets:
+            if t in in_edges:
+                in_edges[t].add(src)
+
+    # --- Summary ---
+    print("=" * 70)
+    print("DEPENDENCY GRAPH")
+    print(f"  {len(nodes)} definitions, {sum(len(t) for t in edges.values())} edges")
+    print(f"  {len(engine_eps)} engine entry points, "
+          f"{len(gui_refs)} gui-referenced, "
+          f"{len(reachable)} reachable, {len(orphans)} orphans")
+    print("=" * 70)
+
+    # --- Entry points with their trees ---
+    if not args.orphans_only:
+        print("\nENTRY POINTS (engine-evaluated)")
+        print("-" * 40)
+        for ep in sorted(engine_eps):
+            kind = nodes[ep][0]
+            targets = edges.get(ep, set())
+            print(f"\n● {ep} ({kind})")
+            print(f"  {nodes[ep][1]}:{nodes[ep][2]}-{nodes[ep][3]}")
+            if targets:
+                seen = {ep}
+                print_tree(ep, edges, nodes, 1, seen, "  ", args.depth)
+
+        if gui_only_eps:
+            print("\n\nGUI-REFERENCED (used in .gui data binding)")
+            print("-" * 40)
+            by_kind = {}
+            for ep in gui_only_eps:
+                kind = nodes[ep][0]
+                by_kind.setdefault(kind, []).append(ep)
+            for kind in sorted(by_kind):
+                print(f"\n  [{kind}]")
+                for ep in sorted(by_kind[kind]):
+                    targets = edges.get(ep, set())
+                    dep_s = ""
+                    if targets:
+                        dep_s = f"  -> {', '.join(sorted(targets))}"
+                    print(f"    {ep}{dep_s}")
+
+    # --- Cross-system connections ---
+    if not args.orphans_only:
+        print("\n" + "=" * 70)
+        print("CROSS-SYSTEM CONNECTIONS")
+        print("-" * 40)
+        kind_groups = {}
+        for name, (kind, f, s, e) in nodes.items():
+            kind_groups.setdefault(kind, set()).add(name)
+
+        cross = []
+        for name, targets in edges.items():
+            src_kind = nodes[name][0]
+            for t in targets:
+                t_kind = nodes[t][0]
+                if src_kind != t_kind:
+                    cross.append((src_kind, name, t_kind, t))
+
+        seen_pairs = set()
+        for sk, sn, tk, tn in sorted(cross):
+            pair = (sk, tk)
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                connections = [(s, t) for s_k, s, t_k, t in cross
+                               if (s_k, t_k) == pair]
+                print(f"\n  {sk} -> {tk}  ({len(connections)} connections)")
+                for s, t in connections[:args.cross_limit]:
+                    print(f"    {s} -> {t}")
+                if len(connections) > args.cross_limit:
+                    print(f"    ... {len(connections) - args.cross_limit} more")
+
+    # --- Orphans ---
+    print("\n" + "=" * 70)
+    print("ORPHANS (unreachable from any entry point)")
+    print("-" * 40)
+
+    if not orphans:
+        print("  (none)")
+    else:
+        clusters = find_connected_clusters(nodes, edges, orphans)
+        isolated = []
+        connected = []
+        for c in clusters:
+            if len(c) == 1:
+                isolated.append(next(iter(c)))
+            else:
+                connected.append(c)
+
+        if connected:
+            print(f"\n  Orphan clusters ({len(connected)} clusters, "
+                  f"internally connected but not reachable from entry points):")
+            for i, cluster in enumerate(connected, 1):
+                print(f"\n  Cluster {i} ({len(cluster)} nodes):")
+                for name in sorted(cluster):
+                    kind = nodes[name][0]
+                    targets_in = edges[name] & cluster
+                    arrow = f" -> {', '.join(sorted(targets_in))}" if targets_in else ""
+                    print(f"    {name} ({kind}){arrow}")
+
+        if isolated:
+            print(f"\n  Isolated orphans ({len(isolated)} definitions, "
+                  "no connections to anything in the mod):")
+            by_kind = {}
+            for name in isolated:
+                kind = nodes[name][0]
+                by_kind.setdefault(kind, []).append(name)
+            for kind in sorted(by_kind):
+                print(f"\n    [{kind}]")
+                for name in sorted(by_kind[kind]):
+                    loc = f"{nodes[name][1]}:{nodes[name][2]}"
+                    in_count = len(in_edges.get(name, set()) - orphans)
+                    note = ""
+                    if in_count:
+                        note = f"  (referenced by {in_count} reachable nodes)"
+                    print(f"      {name}  {loc}{note}")
+
+    # --- Leaf nodes (reachable but reference nothing else in the mod) ---
+    if not args.orphans_only:
+        leaves = [n for n in reachable if not edges[n] and n not in entry_points]
+        if leaves:
+            print("\n" + "=" * 70)
+            print(f"LEAF NODES ({len(leaves)} definitions referenced "
+                  "but calling nothing else in the mod)")
+            print("-" * 40)
+            by_kind = {}
+            for name in leaves:
+                kind = nodes[name][0]
+                by_kind.setdefault(kind, []).append(name)
+            for kind in sorted(by_kind):
+                print(f"\n  [{kind}]")
+                for name in sorted(by_kind[kind]):
+                    callers = sorted(in_edges.get(name, set()))
+                    caller_s = f"  <- {', '.join(callers[:5])}" if callers else ""
+                    if len(callers) > 5:
+                        caller_s += f" +{len(callers)-5} more"
+                    print(f"    {name}{caller_s}")
+
     return 0
 
 
 def main():
     p = argparse.ArgumentParser(description="EU5 PDX script navigation",
                                 epilog="Misses print did-you-mean suggestions.")
+    p.add_argument("--at", metavar="VERSION",
+                   help="Vanilla version tag (e.g. 1.3.11); requires vanilla-tracker")
     sub = p.add_subparsers(dest="cmd")
 
     d = sub.add_parser("def", help="Find definitions")
@@ -775,9 +1535,30 @@ def main():
     v.add_argument("name")
     v.add_argument("-n", "--limit", type=int, default=30)
 
-    ls = sub.add_parser("list", help="List definitions by glob")
-    ls.add_argument("pattern")
+    ls = sub.add_parser("list", help="List definitions by glob or file")
+    ls.add_argument("pattern", nargs="?", default=None)
     ls.add_argument("--kind")
+    ls.add_argument("--file", metavar="PATH",
+                    help="List all definitions in one file (file order)")
+
+    g = sub.add_parser("grep", help="Search indexed symbol names by regex/substring")
+    g.add_argument("pattern")
+    g.add_argument("--kind", help="Filter by kind")
+    g.add_argument("-n", "--limit", type=int, default=50)
+
+    gr = sub.add_parser("graph", help="Dependency graph of all mod definitions")
+    gr.add_argument("--depth", type=int, default=4,
+                    help="Max tree depth for entry point expansion")
+    gr.add_argument("--orphans-only", action="store_true",
+                    help="Only show orphans section")
+    gr.add_argument("--cross-limit", type=int, default=10,
+                    help="Max connections shown per cross-system pair")
+    gr.add_argument("--include-loc", action="store_true",
+                    help="Include localization keys (excluded by default)")
+    gr.add_argument("--include-gui", action="store_true",
+                    help="Include GUI templates/types (excluded by default)")
+    gr.add_argument("--all", action="store_true",
+                    help="Include all definition kinds (loc, gui, etc.)")
 
     sub.add_parser("rebuild", help="Force index rebuild")
 
@@ -789,11 +1570,18 @@ def main():
     if args.cmd == "rebuild":
         return cmd_rebuild(args, None)
 
-    sources = load_sources()
+    sources = load_sources(at_version=args.at)
+
+    # normalize --vanilla / --mod source filter to match GitSource naming
+    if hasattr(args, "source") and args.source == "vanilla":
+        matches = [s for s in sources if s.name.startswith("vanilla")]
+        if matches:
+            args.source = matches[0].name
+
     return {
         "def": cmd_def, "show": cmd_show, "refs": cmd_refs,
         "callers": cmd_callers, "stack": cmd_stack, "vars": cmd_vars,
-        "list": cmd_list,
+        "list": cmd_list, "grep": cmd_grep, "graph": cmd_graph,
     }[args.cmd](args, sources)
 
 
