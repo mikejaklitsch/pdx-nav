@@ -391,13 +391,150 @@ def cmd_list_file(args, sources):
     return 0
 
 
-GUI_OUTLINE_RE = re.compile(
-    r'^\s*(?:(template|local_template)\s+(\w+)'
-    r'|(types)\s+(\w+)'
-    r'|(type)\s+(\w+)\s*=\s*(\w+)'
-    r'|(block|blockoverride)\s+"([^"]+)"'
-    r'|(@\w+)\s*=\s*(.+))\s*\{?\s*$',
+GUI_DEF_KINDS = re.compile(
+    r'(?:^|\s)(template|local_template)\s+(\w+)'
+    r'|(^|\s)(types)\s+(\w+)'
+    r'|(^|\s)(type)\s+(\w+)\s*=\s*(\w+)'
+    r'|(blockoverride)\s+"([^"]+)"'
+    r'|(block)\s+"([^"]+)"',
     re.IGNORECASE)
+
+GUI_VAR_LINE_RE = re.compile(r'^\s*(@\w+)\s*=\s*(.+)')
+
+BLOCK_OPEN_RE = re.compile(r'Block_open:(\S+)')
+BLOCK_CLOSE_RE = re.compile(r'Block_close:(\S+)')
+
+
+def _tag_file(filepath):
+    """Run pdx-gui tag --stdout on a file, return tagged content."""
+    import subprocess, shutil
+    gui = shutil.which("pdx-gui")
+    if not gui:
+        return None
+    try:
+        r = subprocess.run([gui, "tag", str(filepath), "--stdout"],
+                           capture_output=True, text=True, timeout=30)
+        return r.stdout if r.returncode == 0 else None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _tag_text(text):
+    """Run pdx-gui tag on stdin text, return tagged content."""
+    import subprocess, shutil
+    gui = shutil.which("pdx-gui")
+    if not gui:
+        return None
+    try:
+        r = subprocess.run([gui, "tag", "-", "--stdout"],
+                           capture_output=True, text=True, timeout=30,
+                           input=text)
+        return r.stdout if r.returncode == 0 else None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _classify_gui_line(head):
+    """Extract (kind, name) from the non-marker portion of a tagged line."""
+    m_var = GUI_VAR_LINE_RE.match(head)
+    if m_var:
+        return "@var", f"{m_var.group(1)} = {m_var.group(2).strip()}"
+    m_def = GUI_DEF_KINDS.search(head)
+    if m_def:
+        if m_def.group(1):
+            return m_def.group(1).lower(), m_def.group(2)
+        if m_def.group(4):
+            return "types", m_def.group(5)
+        if m_def.group(7):
+            return "type", f"{m_def.group(8)} = {m_def.group(9)}"
+        if m_def.group(10):
+            return "blockoverride", m_def.group(11)
+        if m_def.group(12):
+            return "block", m_def.group(13)
+    return None, None
+
+
+def _parse_gui_tree(tagged_lines):
+    """Build a tree from pdx-gui tagged output. Each node is
+    (kind, name, line, children)."""
+    root = []
+    stack = [root]
+    pending = None
+
+    for i, line in enumerate(tagged_lines, 1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        m_close = BLOCK_CLOSE_RE.search(stripped)
+        if m_close:
+            pending = None
+            if len(stack) > 1:
+                stack.pop()
+            continue
+
+        m_open = BLOCK_OPEN_RE.search(stripped)
+        head = stripped.split(" Block_open:")[0].strip() if m_open else stripped
+
+        kind, name = _classify_gui_line(head) if head else (None, None)
+
+        if kind:
+            node = (kind, name, i, [])
+            stack[-1].append(node)
+            if m_open:
+                stack.append(node[3])
+                pending = None
+            elif kind != "@var":
+                pending = node
+            else:
+                pending = None
+        elif m_open:
+            if pending:
+                stack.append(pending[3])
+                pending = None
+            else:
+                stack.append([])
+
+    return root
+
+
+def _print_gui_tree(nodes, prefix, include_kinds):
+    """Render a GUI tree with connectors and colors."""
+    from .output import c_kind, color_enabled, C_DIM, C_RESET
+
+    filtered = nodes
+    if include_kinds is not None:
+        filtered = []
+        for kind, name, line, children in nodes:
+            child_has = _tree_has_kinds(children, include_kinds)
+            if kind in include_kinds or child_has:
+                filtered.append((kind, name, line, children))
+
+    for i, (kind, name, line, children) in enumerate(filtered):
+        is_last = (i == len(filtered) - 1)
+        connector = "└── " if is_last else "├── "
+        child_prefix = prefix + ("    " if is_last else "│   ")
+
+        cs, ce = c_kind(kind)
+        dim = C_DIM if color_enabled() and kind == "blockoverride" else ""
+        rst = C_RESET if dim else ""
+        show_kind = kind not in include_kinds if include_kinds else False
+
+        if show_kind:
+            dim_on = C_DIM if color_enabled() else ""
+            dim_off = C_RESET if color_enabled() else ""
+            print(f"{prefix}{connector}{cs}{name}{ce} {dim_on}({kind} L{line}){dim_off}")
+        else:
+            print(f"{prefix}{connector}{dim}{cs}{name}{ce}{rst} ({kind} L{line})")
+
+        _print_gui_tree(children, child_prefix, include_kinds)
+
+
+def _tree_has_kinds(nodes, kinds):
+    for kind, name, line, children in nodes:
+        if kind in kinds or _tree_has_kinds(children, kinds):
+            return True
+    return False
 
 
 def cmd_outline(args, sources):
@@ -409,50 +546,38 @@ def cmd_outline(args, sources):
 
     src, fi = matches[0]
     text = src.read_file(fi)
-    lines = text.split("\n")
 
-    depth = 0
-    in_string = False
-    stack = []
+    if src.root:
+        tagged = _tag_file(src.root / src.files[fi])
+    else:
+        tagged = _tag_text(text)
+    if not tagged:
+        print("Error: pdx-gui not found or tagging failed")
+        return 1
 
-    print(f"# {src.files[fi]} ({src.name}, {len(lines)} lines)")
+    tree = _parse_gui_tree(tagged.split("\n"))
 
-    for i, line in enumerate(lines, 1):
-        code, _, masked, in_string = split_line(line, in_string)
-        m = GUI_OUTLINE_RE.match(code)
+    include = None
+    if args.kind:
+        include = set()
+        for k in args.kind:
+            include.update(k.replace(",", " ").split())
 
-        if m:
-            if m.group(1):
-                kind, name = m.group(1), m.group(2)
-            elif m.group(3):
-                kind, name = "types", m.group(4)
-            elif m.group(5):
-                kind = "type"
-                name = f"{m.group(6)} = {m.group(7)}"
-            elif m.group(8):
-                kind, name = m.group(8), m.group(9)
-            elif m.group(10):
-                kind = "@var"
-                name = f"{m.group(10)} = {m.group(11).strip()}"
-            else:
-                kind, name = "?", "?"
-
-            indent = "  " * depth
-            print(f"  {indent}{kind:<16} {name}  L{i}")
-
-        opens = masked.count("{")
-        closes = masked.count("}")
-        new_depth = depth + opens - closes
-        if opens > 0 and m:
-            stack.append(name)
-        elif opens > 0:
-            stack.append(None)
-        for _ in range(max(depth - new_depth, 0)):
-            if stack:
-                stack.pop()
-        depth = max(new_depth, 0)
-
+    line_count = len(text.split("\n"))
+    count = _count_nodes(tree, include)
+    print(f"# {src.files[fi]} ({src.name}, {line_count} lines, {count} constructs)")
+    _print_gui_tree(tree, "", include)
     return 0
+
+
+def _count_nodes(nodes, include_kinds):
+    n = 0
+    for kind, name, line, children in nodes:
+        if include_kinds is None or kind in include_kinds or \
+                _tree_has_kinds(children, include_kinds):
+            n += 1
+        n += _count_nodes(children, include_kinds)
+    return n
 
 
 def cmd_rename(args, sources):

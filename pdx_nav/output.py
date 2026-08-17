@@ -10,6 +10,13 @@ KIND_COLORS = {
     "auto_modifiers": "\033[35m",
     "modifier_type_definitions": "\033[35m",
     "variable": "\033[2m",
+    "types": "\033[1;34m",
+    "type": "\033[36m",
+    "template": "\033[32m",
+    "local_template": "\033[2;32m",
+    "block": "\033[33m",
+    "blockoverride": "\033[2;33m",
+    "@var": "\033[35m",
 }
 C_RESET = "\033[0m"
 C_DIM = "\033[2m"
