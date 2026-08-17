@@ -1,7 +1,7 @@
 import hashlib
 from pathlib import Path
 
-from pdx_common.paths import find_mod_root, vanilla_root  # noqa: F401
+from pdx_utilities.paths import find_mod_root, vanilla_root  # noqa: F401
 from .constants import (CODE_EXTS, EXCLUDE_PARTS, EXCLUDE_SUBTREES,
                         SCAN_TOPDIRS, VANILLA_CACHE_DIR)
 

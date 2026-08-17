@@ -1,4 +1,4 @@
-# pdx-common
+# pdx-utilities
 
 Shared utilities for PDX modding tools (pdx-nav, pdx-gui, pdx-format, etc.).
 
@@ -8,7 +8,7 @@ self-contained and cloneable. Edit here, then push updates to each tool:
 ```bash
 # Pull updates into a tool repo:
 cd ../pdx-nav
-git subtree pull --prefix=pdx_common ../pdx-common master --squash
+git subtree pull --prefix=pdx_utilities ../pdx-utilities master --squash
 ```
 
 ## Modules
