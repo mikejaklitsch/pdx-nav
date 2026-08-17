@@ -1353,13 +1353,15 @@ def cmd_graph(args, sources):
         return 1
 
     sys.stderr.write("pdx-nav: building dependency graph...\n")
-    exclude = set(GRAPH_EXCLUDE_KINDS) if not args.all else set()
-    if args.include_loc:
-        exclude.discard("loc")
-    if args.include_gui:
-        exclude -= {"gui", "template", "type", "types", "local_template"}
+    include = set(args.kind) if args.kind else None
+    exclude = None if include else (set(GRAPH_EXCLUDE_KINDS) if not args.all else set())
+    if exclude is not None:
+        if args.include_loc:
+            exclude.discard("loc")
+        if args.include_gui:
+            exclude -= {"gui", "template", "type", "types", "local_template"}
     nodes, edges, entry_points, gui_refs = build_graph(
-        mod_src, sources, exclude_kinds=exclude)
+        mod_src, sources, include_kinds=include, exclude_kinds=exclude)
     reachable, components, orphans = compute_reachability(nodes, edges, entry_points)
 
     engine_eps = entry_points - gui_refs
@@ -1612,6 +1614,9 @@ def main():
                     help="Include GUI templates/types (excluded by default)")
     gr.add_argument("--all", action="store_true",
                     help="Include all definition kinds (loc, gui, etc.)")
+    gr.add_argument("--kind", action="append", metavar="KIND",
+                    help="Only include these kinds (repeatable, e.g. "
+                    "--kind effect --kind event --kind script_value)")
 
     sub.add_parser("rebuild", help="Force index rebuild")
 
