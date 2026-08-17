@@ -1618,7 +1618,9 @@ def cmd_graph(args, sources):
                 p_last = (pi == len(pairs) - 1)
                 p_conn = "└── " if p_last else "├── "
                 p_pre = s_pre + ("    " if p_last else "│   ")
-                print(f"{s_pre}{p_conn}{sk} -> {tk}  ({len(conns)})")
+                scs, sce = c_kind(sk)
+                tcs, tce = c_kind(tk)
+                print(f"{s_pre}{p_conn}{scs}{sk}{sce} -> {tcs}{tk}{tce}  ({len(conns)})")
                 show = conns[:args.cross_limit]
                 extra = len(conns) - len(show)
                 if extra:
@@ -1631,7 +1633,11 @@ def cmd_graph(args, sources):
                     if c is None:
                         print(f"{p_pre}{c_conn}... {extra} more")
                     else:
-                        print(f"{p_pre}{c_conn}{c[0]} -> {c[1]}")
+                        sk2 = nodes[c[0]][0] if c[0] in nodes else sk
+                        tk2 = nodes[c[1]][0] if c[1] in nodes else tk
+                        s2, se2 = c_kind(sk2)
+                        t2, te2 = c_kind(tk2)
+                        print(f"{p_pre}{c_conn}{s2}{c[0]}{se2} -> {t2}{c[1]}{te2}")
 
         # --- ORPHANS ---
         elif section == "orphans":
