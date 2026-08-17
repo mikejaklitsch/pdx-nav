@@ -1157,14 +1157,133 @@ LOC_CONVENTION_PREFIXES = (
 )
 
 
+def build_raw_graph(mod_src):
+    """Scan all definitions and extract per-block token sets, template tokens,
+    and variable references. Results are cached alongside the index."""
+    cache = cache_dir_for("mod", mod_src.root)
+    cache_path = cache / "graph.json"
+    idx_hash = mod_src.idx.get("hash", "")
+
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text())
+            if cached.get("hash") == idx_hash:
+                return cached
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    sys.stderr.write("pdx-nav: scanning blocks for graph edges...\n")
+    all_names = set()
+    all_defs = {}
+    for d in mod_src.idx["defs"]:
+        name, kind, fi, start, end, flag = d
+        if name in GRAPH_NOISE_NAMES:
+            continue
+        all_names.add(name)
+        all_defs[name] = (kind, fi, start, end)
+
+    list_names = {n for n, (k, *_) in all_defs.items() if k == "scripted_lists"}
+    LIST_PREFIXES = ("every_", "ordered_", "any_", "random_")
+
+    raw_edges = {}
+    raw_vars = {}
+    file_cache = {}
+    for name, (kind, fi, start, end) in all_defs.items():
+        if fi not in file_cache:
+            try:
+                file_cache[fi] = mod_src.read_file(fi).split("\n")
+            except OSError:
+                file_cache[fi] = []
+        lines = file_cache[fi]
+        is_gui = mod_src.files[fi].endswith(".gui")
+        block_tokens = set()
+        template_tokens = set()
+        block_vars = []
+        in_string = False
+        in_var_write = False
+        for line in lines[start - 1:end]:
+            code, _, masked, in_string = split_line(line, in_string)
+            if is_gui:
+                block_tokens.update(WORD_RE.findall(code))
+            else:
+                block_tokens.update(WORD_RE.findall(masked))
+            if "$" in code:
+                template_tokens.update(GRAPH_TEMPLATE_RE.findall(code))
+            if GRAPH_VAR_WRITE_KW.search(masked):
+                in_var_write = True
+            if in_var_write:
+                for m in GRAPH_VAR_NAME_RE.finditer(masked):
+                    block_vars.append([m.group(1), "W"])
+                if "}" in masked:
+                    in_var_write = False
+            for m in GRAPH_VAR_HAS_RE.finditer(masked):
+                block_vars.append([m.group(1), "R"])
+            for m in GRAPH_VAR_REF_RE.finditer(masked):
+                block_vars.append([m.group(1), "R"])
+            for m in GRAPH_VARMAP_RE.finditer(masked):
+                block_vars.append([m.group(1), "M"])
+            for m in GRAPH_VARLIST_RE.finditer(masked):
+                block_vars.append([m.group(1), "L"])
+
+        block_tokens.discard(name)
+        matched = list(block_tokens & all_names)
+        for tok in block_tokens - all_names:
+            if list_names:
+                for pfx in LIST_PREFIXES:
+                    if tok.startswith(pfx):
+                        base = tok[len(pfx):]
+                        if base in list_names:
+                            matched.append(base)
+        for tok in template_tokens:
+            if re.fullmatch(r'\$\w+\$', tok):
+                continue
+            prefix = tok.split("$", 1)[0]
+            for candidate in all_names:
+                if candidate.startswith(prefix) and template_matches(tok, candidate):
+                    matched.append(candidate)
+        raw_edges[name] = sorted(set(matched))
+        if block_vars:
+            raw_vars[name] = block_vars
+
+    gui_tokens = set()
+    for fi, rel in enumerate(mod_src.files):
+        if not rel.endswith(".gui"):
+            continue
+        try:
+            text = mod_src.read_file(fi)
+        except OSError:
+            continue
+        in_string = False
+        for line in text.split("\n"):
+            code, _, _, in_string = split_line(line, in_string)
+            gui_tokens.update(WORD_RE.findall(code))
+
+    if mod_src.root:
+        for top in SCAN_TOPDIRS:
+            mm = mod_src.root / top / "gfx" / "map" / "map_modes"
+            if not mm.is_dir():
+                continue
+            for f in sorted(mm.glob("*.txt")):
+                try:
+                    text = f.read_text(encoding="utf-8-sig", errors="replace")
+                except OSError:
+                    continue
+                in_string = False
+                for line in text.split("\n"):
+                    code, _, _, in_string = split_line(line, in_string)
+                    gui_tokens.update(WORD_RE.findall(code))
+
+    result = {"hash": idx_hash, "edges": raw_edges, "vars": raw_vars,
+              "gui_tokens": sorted(gui_tokens & all_names)}
+    cache_path.write_text(json.dumps(result, separators=(",", ":")))
+    return result
+
+
 def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None,
                 track_vars=False):
-    """Build a directed graph of mod definitions.
-    Returns (nodes, edges, entry_points, gui_refs) where:
-      nodes = {name: (kind, file, start, end)}
-      edges = {name: set(target_names)}  (name references target)
-      entry_points = set(names) that the engine evaluates directly
-    """
+    """Build a filtered dependency graph from the cached raw scan."""
+    raw = build_raw_graph(mod_src)
+
     skip = exclude_kinds or set()
     nodes = {}
     for d in mod_src.idx["defs"]:
@@ -1178,97 +1297,37 @@ def build_graph(mod_src, all_sources, include_kinds=None, exclude_kinds=None,
         nodes[name] = (kind, mod_src.files[fi], start, end)
 
     name_set = set(nodes.keys())
-    list_names = {n for n, (k, *_) in nodes.items() if k == "scripted_lists"}
-    LIST_PREFIXES = ("every_", "ordered_", "any_", "random_")
-    edges = {n: set() for n in nodes}
+    edges = {}
     entry_points = set()
-    var_refs = {}  # {def_name: {(var_name, role)}} where role = W/R/M/L
-
-    file_cache = {}
-    for d in mod_src.idx["defs"]:
-        name, kind, fi, start, end, flag = d
-        if name not in nodes:
-            continue
+    for name in nodes:
+        edges[name] = set(t for t in raw["edges"].get(name, []) if t in name_set)
+        kind = nodes[name][0]
         if kind in ENGINE_EVALUATED_KINDS:
             entry_points.add(name)
         if kind == "loc" and any(name.startswith(p) for p in LOC_CONVENTION_PREFIXES):
             entry_points.add(name)
 
-        if fi not in file_cache:
-            try:
-                file_cache[fi] = mod_src.read_file(fi).split("\n")
-            except OSError:
-                file_cache[fi] = []
-        lines = file_cache[fi]
-        is_gui = mod_src.files[fi].endswith(".gui")
-        block_tokens = set()
-        template_tokens = set()
-        block_vars = set()
-        in_string = False
-        in_var_write = False
-        for line in lines[start - 1:end]:
-            code, _, masked, in_string = split_line(line, in_string)
-            if is_gui:
-                block_tokens.update(WORD_RE.findall(code))
-            else:
-                block_tokens.update(WORD_RE.findall(masked))
-            if "$" in code:
-                template_tokens.update(GRAPH_TEMPLATE_RE.findall(code))
-            if track_vars:
-                if GRAPH_VAR_WRITE_KW.search(masked):
-                    in_var_write = True
-                if in_var_write:
-                    for m in GRAPH_VAR_NAME_RE.finditer(masked):
-                        block_vars.add((m.group(1), "W"))
-                    if "}" in masked:
-                        in_var_write = False
-                for m in GRAPH_VAR_HAS_RE.finditer(masked):
-                    block_vars.add((m.group(1), "R"))
-                for m in GRAPH_VAR_REF_RE.finditer(masked):
-                    block_vars.add((m.group(1), "R"))
-                for m in GRAPH_VARMAP_RE.finditer(masked):
-                    block_vars.add((m.group(1), "M"))
-                for m in GRAPH_VARLIST_RE.finditer(masked):
-                    block_vars.add((m.group(1), "L"))
-        block_tokens.discard(name)
-        matched = block_tokens & name_set
-        for tok in block_tokens - name_set:
-            if list_names:
-                for pfx in LIST_PREFIXES:
-                    if tok.startswith(pfx):
-                        base = tok[len(pfx):]
-                        if base in list_names:
-                            matched.add(base)
-        for tok in template_tokens:
-            if re.fullmatch(r'\$\w+\$', tok):
-                continue
-            prefix = tok.split("$", 1)[0]
-            for candidate in name_set:
-                if candidate.startswith(prefix) and template_matches(tok, candidate):
-                    matched.add(candidate)
-        edges[name] = matched
-        if block_vars:
-            var_refs[name] = block_vars
-
-    if track_vars and var_refs:
+    if track_vars:
         all_vars = set()
-        for pairs in var_refs.values():
-            for vn, role in pairs:
+        for name in nodes:
+            for vn, role in raw["vars"].get(name, []):
                 all_vars.add(vn)
         for vn in all_vars:
             var_key = f"var:{vn}"
             nodes[var_key] = ("variable", "", 0, 0)
             edges[var_key] = set()
-        for def_name, pairs in var_refs.items():
-            for vn, role in pairs:
+        for name in list(nodes):
+            for vn, role in raw["vars"].get(name, []):
                 var_key = f"var:{vn}"
+                if var_key not in nodes:
+                    continue
                 if role == "W":
-                    edges[def_name].add(var_key)
+                    edges.setdefault(name, set()).add(var_key)
                 else:
-                    edges[var_key].add(def_name)
+                    edges[var_key].add(name)
         name_set = set(nodes.keys())
 
-    gui_refs = scan_gui_references(mod_src, name_set)
+    gui_refs = set(t for t in raw.get("gui_tokens", []) if t in name_set)
     entry_points.update(gui_refs)
 
     return nodes, edges, entry_points, gui_refs
