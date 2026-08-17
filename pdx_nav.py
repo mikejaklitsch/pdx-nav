@@ -1318,7 +1318,16 @@ def find_connected_clusters(nodes, edges, orphans):
     return clusters
 
 
-def print_tree(name, edges, nodes, depth, seen, prefix, max_depth):
+def tree_items(items, prefix, fmt):
+    """Print items as tree branches. fmt(item, is_last) returns the display string."""
+    for i, item in enumerate(items):
+        is_last = (i == len(items) - 1)
+        connector = "└── " if is_last else "├── "
+        child_prefix = prefix + ("    " if is_last else "│   ")
+        print(f"{prefix}{connector}{fmt(item, child_prefix)}")
+
+
+def dep_tree(name, edges, nodes, depth, seen, prefix, max_depth):
     """Recursively print a dependency tree."""
     targets = sorted(edges.get(name, set()))
     for i, t in enumerate(targets):
@@ -1330,7 +1339,7 @@ def print_tree(name, edges, nodes, depth, seen, prefix, max_depth):
         if t not in seen and depth < max_depth:
             seen.add(t)
             child_prefix = prefix + ("    " if is_last else "│   ")
-            print_tree(t, edges, nodes, depth + 1, seen, child_prefix, max_depth)
+            dep_tree(t, edges, nodes, depth + 1, seen, child_prefix, max_depth)
 
 
 def cmd_graph(args, sources):
@@ -1362,139 +1371,183 @@ def cmd_graph(args, sources):
             if t in in_edges:
                 in_edges[t].add(src)
 
-    # --- Summary ---
-    print("=" * 70)
-    print("DEPENDENCY GRAPH")
-    print(f"  {len(nodes)} definitions, {sum(len(t) for t in edges.values())} edges")
-    print(f"  {len(engine_eps)} engine entry points, "
-          f"{len(gui_refs)} gui-referenced, "
-          f"{len(reachable)} reachable, {len(orphans)} orphans")
-    print("=" * 70)
-
-    # --- Entry points with their trees ---
+    # collect sections
+    sections = []
     if not args.orphans_only:
-        print("\nENTRY POINTS (engine-evaluated)")
-        print("-" * 40)
-        for ep in sorted(engine_eps):
-            kind = nodes[ep][0]
-            targets = edges.get(ep, set())
-            print(f"\n● {ep} ({kind})")
-            print(f"  {nodes[ep][1]}:{nodes[ep][2]}-{nodes[ep][3]}")
-            if targets:
-                seen = {ep}
-                print_tree(ep, edges, nodes, 1, seen, "  ", args.depth)
-
+        sections.append("entry_points")
         if gui_only_eps:
-            print("\n\nGUI-REFERENCED (used in .gui data binding)")
-            print("-" * 40)
-            by_kind = {}
-            for ep in gui_only_eps:
-                kind = nodes[ep][0]
-                by_kind.setdefault(kind, []).append(ep)
-            for kind in sorted(by_kind):
-                print(f"\n  [{kind}]")
-                for ep in sorted(by_kind[kind]):
-                    targets = edges.get(ep, set())
-                    dep_s = ""
-                    if targets:
-                        dep_s = f"  -> {', '.join(sorted(targets))}"
-                    print(f"    {ep}{dep_s}")
-
-    # --- Cross-system connections ---
-    if not args.orphans_only:
-        print("\n" + "=" * 70)
-        print("CROSS-SYSTEM CONNECTIONS")
-        print("-" * 40)
-        kind_groups = {}
-        for name, (kind, f, s, e) in nodes.items():
-            kind_groups.setdefault(kind, set()).add(name)
-
-        cross = []
-        for name, targets in edges.items():
-            src_kind = nodes[name][0]
-            for t in targets:
-                t_kind = nodes[t][0]
-                if src_kind != t_kind:
-                    cross.append((src_kind, name, t_kind, t))
-
-        seen_pairs = set()
-        for sk, sn, tk, tn in sorted(cross):
-            pair = (sk, tk)
-            if pair not in seen_pairs:
-                seen_pairs.add(pair)
-                connections = [(s, t) for s_k, s, t_k, t in cross
-                               if (s_k, t_k) == pair]
-                print(f"\n  {sk} -> {tk}  ({len(connections)} connections)")
-                for s, t in connections[:args.cross_limit]:
-                    print(f"    {s} -> {t}")
-                if len(connections) > args.cross_limit:
-                    print(f"    ... {len(connections) - args.cross_limit} more")
-
-    # --- Orphans ---
-    print("\n" + "=" * 70)
-    print("ORPHANS (unreachable from any entry point)")
-    print("-" * 40)
-
-    if not orphans:
-        print("  (none)")
-    else:
-        clusters = find_connected_clusters(nodes, edges, orphans)
-        isolated = []
-        connected = []
-        for c in clusters:
-            if len(c) == 1:
-                isolated.append(next(iter(c)))
-            else:
-                connected.append(c)
-
-        if connected:
-            print(f"\n  Orphan clusters ({len(connected)} clusters, "
-                  f"internally connected but not reachable from entry points):")
-            for i, cluster in enumerate(connected, 1):
-                print(f"\n  Cluster {i} ({len(cluster)} nodes):")
-                for name in sorted(cluster):
-                    kind = nodes[name][0]
-                    targets_in = edges[name] & cluster
-                    arrow = f" -> {', '.join(sorted(targets_in))}" if targets_in else ""
-                    print(f"    {name} ({kind}){arrow}")
-
-        if isolated:
-            print(f"\n  Isolated orphans ({len(isolated)} definitions, "
-                  "no connections to anything in the mod):")
-            by_kind = {}
-            for name in isolated:
-                kind = nodes[name][0]
-                by_kind.setdefault(kind, []).append(name)
-            for kind in sorted(by_kind):
-                print(f"\n    [{kind}]")
-                for name in sorted(by_kind[kind]):
-                    loc = f"{nodes[name][1]}:{nodes[name][2]}"
-                    in_count = len(in_edges.get(name, set()) - orphans)
-                    note = ""
-                    if in_count:
-                        note = f"  (referenced by {in_count} reachable nodes)"
-                    print(f"      {name}  {loc}{note}")
-
-    # --- Leaf nodes (reachable but reference nothing else in the mod) ---
+            sections.append("gui_referenced")
+        sections.append("cross_system")
+    sections.append("orphans")
     if not args.orphans_only:
         leaves = [n for n in reachable if not edges[n] and n not in entry_points]
         if leaves:
-            print("\n" + "=" * 70)
-            print(f"LEAF NODES ({len(leaves)} definitions referenced "
-                  "but calling nothing else in the mod)")
-            print("-" * 40)
+            sections.append("leaves")
+
+    # root
+    edge_count = sum(len(t) for t in edges.values())
+    print(f"DEPENDENCY GRAPH  "
+          f"{len(nodes)} defs, {edge_count} edges, "
+          f"{len(engine_eps)} engine, {len(gui_refs)} gui, "
+          f"{len(reachable)} reachable, {len(orphans)} orphans")
+
+    for si, section in enumerate(sections):
+        s_last = (si == len(sections) - 1)
+        s_conn = "└── " if s_last else "├── "
+        s_pre = "    " if s_last else "│   "
+
+        # --- ENTRY POINTS ---
+        if section == "entry_points":
+            print(f"{s_conn}ENTRY POINTS (engine-evaluated)")
+            eps = sorted(engine_eps)
+            for ei, ep in enumerate(eps):
+                e_last = (ei == len(eps) - 1)
+                e_conn = "└── " if e_last else "├── "
+                e_pre = s_pre + ("    " if e_last else "│   ")
+                kind = nodes[ep][0]
+                loc = f"{nodes[ep][1]}:{nodes[ep][2]}-{nodes[ep][3]}"
+                print(f"{s_pre}{e_conn}{ep} ({kind})  {loc}")
+                targets = edges.get(ep, set())
+                if targets:
+                    seen = {ep}
+                    dep_tree(ep, edges, nodes, 1, seen, e_pre, args.depth)
+
+        # --- GUI-REFERENCED ---
+        elif section == "gui_referenced":
+            print(f"{s_conn}GUI-REFERENCED (used in .gui data binding)")
+            by_kind = {}
+            for ep in gui_only_eps:
+                by_kind.setdefault(nodes[ep][0], []).append(ep)
+            kinds = sorted(by_kind)
+            for ki, kind in enumerate(kinds):
+                k_last = (ki == len(kinds) - 1)
+                k_conn = "└── " if k_last else "├── "
+                k_pre = s_pre + ("    " if k_last else "│   ")
+                items = sorted(by_kind[kind])
+                print(f"{s_pre}{k_conn}{kind} ({len(items)})")
+                for ii, ep in enumerate(items):
+                    i_last = (ii == len(items) - 1)
+                    i_conn = "└── " if i_last else "├── "
+                    targets = edges.get(ep, set())
+                    dep_s = ""
+                    if targets:
+                        dep_s = f" -> {', '.join(sorted(targets))}"
+                    print(f"{k_pre}{i_conn}{ep}{dep_s}")
+
+        # --- CROSS-SYSTEM ---
+        elif section == "cross_system":
+            print(f"{s_conn}CROSS-SYSTEM CONNECTIONS")
+            cross = []
+            for name, targets in edges.items():
+                sk = nodes[name][0]
+                for t in targets:
+                    tk = nodes[t][0]
+                    if sk != tk:
+                        cross.append((sk, name, tk, t))
+            pairs = []
+            seen_pairs = set()
+            for sk, sn, tk, tn in sorted(cross):
+                pair = (sk, tk)
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    conns = [(s, t) for s_k, s, t_k, t in cross
+                             if (s_k, t_k) == pair]
+                    pairs.append((sk, tk, conns))
+            for pi, (sk, tk, conns) in enumerate(pairs):
+                p_last = (pi == len(pairs) - 1)
+                p_conn = "└── " if p_last else "├── "
+                p_pre = s_pre + ("    " if p_last else "│   ")
+                print(f"{s_pre}{p_conn}{sk} -> {tk}  ({len(conns)})")
+                show = conns[:args.cross_limit]
+                extra = len(conns) - len(show)
+                if extra:
+                    show_items = show + [None]
+                else:
+                    show_items = show
+                for ci, c in enumerate(show_items):
+                    c_last = (ci == len(show_items) - 1)
+                    c_conn = "└── " if c_last else "├── "
+                    if c is None:
+                        print(f"{p_pre}{c_conn}... {extra} more")
+                    else:
+                        print(f"{p_pre}{c_conn}{c[0]} -> {c[1]}")
+
+        # --- ORPHANS ---
+        elif section == "orphans":
+            print(f"{s_conn}ORPHANS (unreachable from entry points)")
+            if not orphans:
+                print(f"{s_pre}└── (none)")
+            else:
+                clusters = find_connected_clusters(nodes, edges, orphans)
+                connected = [c for c in clusters if len(c) > 1]
+                isolated = sorted(n for c in clusters if len(c) == 1
+                                  for n in c)
+                parts = []
+                for i, cluster in enumerate(connected, 1):
+                    parts.append(("cluster", i, cluster))
+                if isolated:
+                    parts.append(("isolated", 0, isolated))
+
+                for pi, (ptype, idx, data) in enumerate(parts):
+                    p_last = (pi == len(parts) - 1)
+                    p_conn = "└── " if p_last else "├── "
+                    p_pre = s_pre + ("    " if p_last else "│   ")
+
+                    if ptype == "cluster":
+                        print(f"{s_pre}{p_conn}Cluster {idx} "
+                              f"({len(data)} nodes, disconnected)")
+                        items = sorted(data)
+                        for ii, name in enumerate(items):
+                            i_last = (ii == len(items) - 1)
+                            i_conn = "└── " if i_last else "├── "
+                            kind = nodes[name][0]
+                            targets_in = edges[name] & data
+                            arrow = ""
+                            if targets_in:
+                                arrow = f" -> {', '.join(sorted(targets_in))}"
+                            print(f"{p_pre}{i_conn}{name} ({kind}){arrow}")
+                    else:
+                        print(f"{s_pre}{p_conn}Isolated ({len(data)})")
+                        by_kind = {}
+                        for name in data:
+                            by_kind.setdefault(nodes[name][0], []).append(name)
+                        kinds = sorted(by_kind)
+                        for ki, kind in enumerate(kinds):
+                            k_last = (ki == len(kinds) - 1)
+                            k_conn = "└── " if k_last else "├── "
+                            k_pre = p_pre + ("    " if k_last else "│   ")
+                            items = sorted(by_kind[kind])
+                            print(f"{p_pre}{k_conn}{kind} ({len(items)})")
+                            for ii, name in enumerate(items):
+                                i_last = (ii == len(items) - 1)
+                                i_conn = "└── " if i_last else "├── "
+                                loc = f"{nodes[name][1]}:{nodes[name][2]}"
+                                print(f"{k_pre}{i_conn}{name}  {loc}")
+
+        # --- LEAF NODES ---
+        elif section == "leaves":
+            print(f"{s_conn}LEAF NODES ({len(leaves)})")
             by_kind = {}
             for name in leaves:
-                kind = nodes[name][0]
-                by_kind.setdefault(kind, []).append(name)
-            for kind in sorted(by_kind):
-                print(f"\n  [{kind}]")
-                for name in sorted(by_kind[kind]):
+                by_kind.setdefault(nodes[name][0], []).append(name)
+            kinds = sorted(by_kind)
+            for ki, kind in enumerate(kinds):
+                k_last = (ki == len(kinds) - 1)
+                k_conn = "└── " if k_last else "├── "
+                k_pre = s_pre + ("    " if k_last else "│   ")
+                items = sorted(by_kind[kind])
+                print(f"{s_pre}{k_conn}{kind} ({len(items)})")
+                for ii, name in enumerate(items):
+                    i_last = (ii == len(items) - 1)
+                    i_conn = "└── " if i_last else "├── "
                     callers = sorted(in_edges.get(name, set()))
-                    caller_s = f"  <- {', '.join(callers[:5])}" if callers else ""
-                    if len(callers) > 5:
-                        caller_s += f" +{len(callers)-5} more"
-                    print(f"    {name}{caller_s}")
+                    caller_s = ""
+                    if callers:
+                        shown = callers[:5]
+                        caller_s = f"  <- {', '.join(shown)}"
+                        if len(callers) > 5:
+                            caller_s += f" +{len(callers)-5}"
+                    print(f"{k_pre}{i_conn}{name}{caller_s}")
 
     return 0
 
