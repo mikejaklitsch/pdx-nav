@@ -1,4 +1,3 @@
-import hashlib
 import json
 import os
 import subprocess
@@ -6,7 +5,11 @@ import sys
 from bisect import bisect_right
 from pathlib import Path
 
-from .constants import CODE_EXTS, SCAN_TOPDIRS, EXCLUDE_PARTS, EXCLUDE_SUBTREES, VANILLA_CACHE_DIR
+from pdx_utilities.git import (git_tags, git_latest_tag, git_resolve_version,
+                                git_resolve_ref, git_extract_files, git_read_file)
+from pdx_utilities.paths import find_vanilla_repo
+
+from .constants import CODE_EXTS, EXCLUDE_SUBTREES, SCAN_TOPDIRS, EXCLUDE_PARTS, VANILLA_CACHE_DIR
 from .parsing import parse_defs
 from .paths import cache_dir_for, collect_files, files_hash, find_mod_root, vanilla_root
 
@@ -159,83 +162,14 @@ class Source:
 
 # --- vanilla-tracker (bare git repo) ---
 
-def find_vanilla_tracker(mod_root=None):
-    """Discover the vanilla-tracker bare git repo."""
-    env = os.environ.get("PDX_VANILLA_REPO")
-    if env:
-        p = Path(env).resolve()
-        if p.exists():
-            return p
-
-    if mod_root:
-        candidate = mod_root.parent / "vanilla-tracker" / "repo.git"
-        if candidate.exists():
-            return candidate
-
-    return None
-
-
-def tracker_tags(repo):
-    try:
-        r = subprocess.run(
-            ["git", f"--git-dir={repo}", "tag", "-l",
-             "--format=%(refname:short) %(objectname:short)"],
-            capture_output=True, text=True, timeout=10)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return {}
-    tags = {}
-    for line in r.stdout.strip().split("\n"):
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) == 2:
-            tags[parts[0]] = parts[1]
-    return tags
-
-
-def tracker_latest_tag(repo):
-    try:
-        r = subprocess.run(
-            ["git", f"--git-dir={repo}", "tag", "--sort=-creatordate"],
-            capture_output=True, text=True, timeout=10)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
-    for line in r.stdout.strip().split("\n"):
-        if line.strip():
-            return line.strip()
-    return None
-
-
-def tracker_resolve_ref(repo, version):
-    tags = tracker_tags(repo)
-    if version in tags:
-        return version
-    try:
-        r = subprocess.run(
-            ["git", f"--git-dir={repo}", "rev-parse", "--verify",
-             f"{version}^{{commit}}"],
-            capture_output=True, text=True, timeout=10)
-        if r.returncode == 0:
-            return version
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-    import difflib
-    close = difflib.get_close_matches(version, list(tags.keys()), n=3, cutoff=0.5)
-    hint = f"; did you mean: {', '.join(close)}" if close else \
-        f"; available: {', '.join(sorted(tags.keys()))}"
-    print(f"Error: unknown version '{version}'{hint}", file=sys.stderr)
-    return None
-
-
 def tracker_collect_files(repo, ref):
-    try:
-        r = subprocess.run(
-            ["git", f"--git-dir={repo}", "ls-tree", "-r", "--name-only", ref],
-            capture_output=True, text=True, timeout=30)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    from pdx_utilities.git import git as _git
+    out = _git(repo, "ls-tree", "-r", "--name-only", ref, timeout=30)
+    if not out:
         return []
+    nav_exts = CODE_EXTS | {".yml"}
     files = []
-    for line in r.stdout.split("\n"):
+    for line in out.split("\n"):
         rel = line.strip()
         if not rel:
             continue
@@ -243,7 +177,7 @@ def tracker_collect_files(repo, ref):
         if parts[0] not in SCAN_TOPDIRS:
             continue
         ext = Path(rel).suffix.lower()
-        if ext not in CODE_EXTS and ext != ".yml":
+        if ext not in nav_exts:
             continue
         if EXCLUDE_PARTS.intersection(parts):
             continue
@@ -253,34 +187,13 @@ def tracker_collect_files(repo, ref):
     return sorted(files)
 
 
-def tracker_read_file(repo, ref, rel):
-    try:
-        r = subprocess.run(
-            ["git", f"--git-dir={repo}", "show", f"{ref}:{rel}"],
-            capture_output=True, timeout=30)
-        if r.returncode != 0:
-            return None
-        raw = r.stdout
-        if raw[:3] == b'\xef\xbb\xbf':
-            raw = raw[3:]
-        return raw.decode("utf-8", errors="replace")
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
-
-
 def build_tracker_index(repo, ref, version_label):
     cache = VANILLA_CACHE_DIR / f"tracker-{version_label}"
     cache.mkdir(parents=True, exist_ok=True)
     idx_path = cache / "index.json"
     corpus_path = cache / "corpus.txt"
 
-    try:
-        r = subprocess.run(
-            ["git", f"--git-dir={repo}", "rev-parse", ref],
-            capture_output=True, text=True, timeout=10)
-        commit_hash = r.stdout.strip() if r.returncode == 0 else ref
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        commit_hash = ref
+    commit_hash = git_resolve_ref(repo, ref) or ref
 
     if idx_path.exists() and corpus_path.exists():
         try:
@@ -294,32 +207,11 @@ def build_tracker_index(repo, ref, version_label):
     sys.stderr.write(
         f"pdx-nav: indexing vanilla-tracker {version_label} ({len(files)} files)...\n")
 
-    import tarfile
-    import io
-    file_contents = {}
-    if files:
-        try:
-            r = subprocess.run(
-                ["git", f"--git-dir={repo}", "archive", ref] + files,
-                capture_output=True, timeout=120)
-            if r.returncode == 0:
-                tf = tarfile.open(fileobj=io.BytesIO(r.stdout))
-                for member in tf.getmembers():
-                    if not member.isfile():
-                        continue
-                    raw = tf.extractfile(member).read()
-                    if raw[:3] == b'\xef\xbb\xbf':
-                        raw = raw[3:]
-                    file_contents[member.name] = raw.decode("utf-8", errors="replace")
-                tf.close()
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-        except Exception:
-            pass
+    file_contents = git_extract_files(repo, ref, files) if files else {}
 
     for rel in files:
         if rel not in file_contents:
-            text = tracker_read_file(repo, ref, rel)
+            text = git_read_file(repo, ref, rel)
             if text is not None:
                 file_contents[rel] = text
 
@@ -356,7 +248,7 @@ class GitSource(Source):
         self._init_lookups()
 
     def read_file(self, fi):
-        text = tracker_read_file(self._repo, self._ref, self.files[fi])
+        text = git_read_file(self._repo, self._ref, self.files[fi])
         return text if text is not None else ""
 
 
@@ -366,13 +258,13 @@ def load_sources(need_mod=True, at_version=None):
     if mod and need_mod:
         sources.append(Source("mod", mod))
 
-    tracker = find_vanilla_tracker(mod)
+    tracker = find_vanilla_repo(mod)
     if tracker:
         version = at_version
         if not version:
-            version = tracker_latest_tag(tracker)
+            version = git_latest_tag(tracker)
         if version:
-            ref = tracker_resolve_ref(tracker, version)
+            ref = git_resolve_version(tracker, version)
             if ref is None:
                 sys.exit(1)
             sources.append(GitSource(tracker, ref, version))

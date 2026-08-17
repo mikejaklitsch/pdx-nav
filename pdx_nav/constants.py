@@ -1,13 +1,11 @@
 import re
 from pathlib import Path
 
+from pdx_utilities.constants import SCAN_TOPDIRS, CODE_EXTS, EXCLUDE_PARTS  # noqa: F401
+
 VANILLA_CACHE_DIR = Path.home() / ".cache" / "pdx-nav"
 
-SCAN_TOPDIRS = ("in_game", "main_menu", "loading_screen")
-EXCLUDE_PARTS = {".git", ".claude", ".gui_workspace", "__pycache__", "tools",
-                 ".metadata", ".dev-mods"}
 EXCLUDE_SUBTREES = ("gfx/map",)
-CODE_EXTS = {".txt", ".gui"}
 
 KIND_DISPLAY = {
     "scripted_effects": "effect",

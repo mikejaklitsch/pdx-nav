@@ -7,8 +7,9 @@ from .constants import ENTRY_KINDS, VAR_WRITE_FAMILY
 from .output import fmt_def, suggest
 from .paths import find_mod_root, cache_dir_for
 from .scanner import split_line
-from .source import (Source, build_index, build_tracker_index,
-                     find_vanilla_tracker, tracker_latest_tag, vanilla_root)
+from pdx_utilities.git import git_latest_tag
+from pdx_utilities.paths import find_vanilla_repo
+from .source import (Source, build_index, build_tracker_index, vanilla_root)
 from .constants import VANILLA_CACHE_DIR
 
 
@@ -612,13 +613,14 @@ def cmd_rename(args, sources):
             raw = path.read_bytes()
         except OSError:
             continue
-        has_bom = raw[:3] == b'\xef\xbb\xbf'
+        from pdx_utilities.fileio import BOM_BYTES
+        has_bom = raw[:3] == BOM_BYTES
         text = (raw[3:] if has_bom else raw).decode('utf-8', errors='replace')
         new_text, count = pat.subn(new, text)
         if count == 0:
             continue
         if not args.dry_run:
-            out = (b'\xef\xbb\xbf' + new_text.encode('utf-8')) if has_bom else new_text.encode('utf-8')
+            out = (BOM_BYTES + new_text.encode('utf-8')) if has_bom else new_text.encode('utf-8')
             path.write_bytes(out)
         changed.append((rel, count))
         total += count
@@ -652,9 +654,9 @@ def cmd_rebuild(args, _sources):
         print(f"mod: {len(idx['defs'])} definitions from "
               f"{len(idx['files'])} files")
 
-    tracker = find_vanilla_tracker(mod)
+    tracker = find_vanilla_repo(mod)
     if tracker:
-        version = getattr(args, "at", None) or tracker_latest_tag(tracker)
+        version = getattr(args, "at", None) or git_latest_tag(tracker)
         if version:
             cache = VANILLA_CACHE_DIR / f"tracker-{version}"
             if cache.exists():

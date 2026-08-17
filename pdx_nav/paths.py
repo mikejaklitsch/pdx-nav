@@ -2,8 +2,10 @@ import hashlib
 from pathlib import Path
 
 from pdx_utilities.paths import find_mod_root, vanilla_root  # noqa: F401
-from .constants import (CODE_EXTS, EXCLUDE_PARTS, EXCLUDE_SUBTREES,
-                        SCAN_TOPDIRS, VANILLA_CACHE_DIR)
+from pdx_utilities.files import collect_files as _collect_files
+from .constants import (CODE_EXTS, EXCLUDE_SUBTREES, VANILLA_CACHE_DIR)
+
+NAV_EXTS = CODE_EXTS | {".yml"}
 
 
 def cache_dir_for(source, root):
@@ -17,23 +19,10 @@ def cache_dir_for(source, root):
 
 
 def collect_files(root):
-    files = []
-    for top in SCAN_TOPDIRS:
-        base = root / top
-        if not base.is_dir():
-            continue
-        for f in sorted(base.rglob("*")):
-            if not f.is_file():
-                continue
-            ext = f.suffix.lower()
-            if ext not in CODE_EXTS and not (ext == ".yml"):
-                continue
-            rel = f.relative_to(root).as_posix()
-            if EXCLUDE_PARTS.intersection(rel.split("/")):
-                continue
-            if any(sub in rel for sub in EXCLUDE_SUBTREES):
-                continue
-            files.append(rel)
+    files = _collect_files(root, exts=NAV_EXTS)
+    if EXCLUDE_SUBTREES:
+        files = [f for f in files
+                 if not any(sub in f for sub in EXCLUDE_SUBTREES)]
     return files
 
 

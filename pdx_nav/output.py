@@ -1,5 +1,6 @@
 import re
-import sys
+
+from pdx_utilities.terminal import color_enabled, C_RESET, C_DIM  # noqa: F401
 
 KIND_COLORS = {
     "effect": "\033[32m",
@@ -18,16 +19,6 @@ KIND_COLORS = {
     "blockoverride": "\033[2;33m",
     "@var": "\033[35m",
 }
-C_RESET = "\033[0m"
-C_DIM = "\033[2m"
-_use_color = None
-
-
-def color_enabled():
-    global _use_color
-    if _use_color is None:
-        _use_color = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-    return _use_color
 
 
 def c_kind(kind):
