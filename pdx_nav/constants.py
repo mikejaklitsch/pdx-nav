@@ -26,6 +26,7 @@ DEF_RE = re.compile(r'^\s*(INJECT:|REPLACE:|TRY_INJECT:)?([A-Za-z_@][\w.]*)\s*[=
 GUI_DEF_RE = re.compile(r'^\s*(template|types|type|local_template)\s+(\w+)')
 GUI_VAR_RE = re.compile(r'^\s*@(\w+)\s*=\s*(.+)')
 LOC_DEF_RE = re.compile(r'^\s*([\w.\-]+):\d*\s*"')
+MACRO_DEF_RE = re.compile(r'^\s*definition\s*=\s*"(\w+)(?:\(|")')
 
 VAR_WRITE_FAMILY = re.compile(
     r'\b(?:set|change|round|clamp|divide|multiply|subtract_from|add_to|remove'
@@ -40,9 +41,11 @@ ENGINE_EVALUATED_KINDS = {"on_action", "auto_modifiers", "static_modifiers",
 WORD_RE = re.compile(r'[A-Za-z_@][\w.]*')
 TEMPLATE_TOKEN_RE = re.compile(r'[A-Za-z_][\w.]*(?:\$\w+\$[\w.]*)+')
 
-GRAPH_EXCLUDE_KINDS = {"loc", "gui", "gui_var", "template", "type", "types",
-                        "local_template", "map_modes"}
-GRAPH_DEFAULT_KINDS = {"on_action", "effect", "event", "script_value"}
+GRAPH_EXCLUDE_KINDS = {"loc", "gui_var", "map_modes"}
+GRAPH_DEFAULT_KINDS = {"on_action", "effect", "event", "script_value",
+                       "trigger", "template", "type", "types",
+                       "local_template", "building", "production_method",
+                       "scripted_gui", "generic_action", "macro"}
 GRAPH_TEMPLATE_RE = re.compile(
     r'(?:[A-Za-z_][\w.]*)?'
     r'(?:\$\w+\$[\w.]*)'
