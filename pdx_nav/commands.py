@@ -404,9 +404,20 @@ def cmd_rename(args, sources):
         print("Error: no mod root found")
         return 1
 
+    cwd = Path.cwd().resolve()
+    try:
+        scope = cwd.relative_to(mod_src.root).as_posix()
+    except ValueError:
+        print("Error: not inside the mod root")
+        return 1
+    if scope == ".":
+        scope = ""
+
     changed = []
     total = 0
     for rel in mod_src.files:
+        if scope and not rel.startswith(scope):
+            continue
         path = mod_src.root / rel
         try:
             raw = path.read_bytes()
