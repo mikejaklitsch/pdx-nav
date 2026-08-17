@@ -1131,9 +1131,7 @@ def cmd_rebuild(args, _sources):
 WORD_RE = re.compile(r'[A-Za-z_@][\w.]*')
 GRAPH_EXCLUDE_KINDS = {"loc", "gui", "template", "type", "types",
                         "local_template", "map_modes"}
-GRAPH_DEFAULT_KINDS = {"on_action", "effect", "event", "script_value",
-                        "static_modifiers", "auto_modifiers",
-                        "modifier_type_definitions"}
+GRAPH_DEFAULT_KINDS = {"on_action", "effect", "event", "script_value"}
 GRAPH_TEMPLATE_RE = re.compile(
     r'(?:[A-Za-z_][\w.]*)?'     # optional static prefix
     r'(?:\$\w+\$[\w.]*)'        # first $param$ segment
