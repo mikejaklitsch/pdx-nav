@@ -52,13 +52,15 @@ def main():
 
     ls = sub.add_parser("list", help="List definitions by glob or file")
     ls.add_argument("pattern", nargs="?", default=None)
-    ls.add_argument("--kind")
+    ls.add_argument("--exclude", metavar="KIND",
+                    help="Exclude kinds (comma-separated)")
     ls.add_argument("--file", metavar="PATH",
                     help="List all definitions in one file (file order)")
 
     g = sub.add_parser("grep", help="Search indexed symbol names by regex/substring")
     g.add_argument("pattern")
-    g.add_argument("--kind", help="Filter by kind")
+    g.add_argument("--exclude", metavar="KIND",
+                   help="Exclude kinds (comma-separated)")
     g.add_argument("-n", "--limit", type=int, default=50)
 
     gr = sub.add_parser("graph", help="Dependency graph of all mod definitions")

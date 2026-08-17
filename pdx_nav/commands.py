@@ -277,11 +277,14 @@ def cmd_list(args, sources):
         print("Error: pattern required (or use --file <path>)")
         return 1
     pat = pat.lower()
+    excluded = set()
+    if args.exclude:
+        excluded = set(args.exclude.replace(",", " ").split())
     rows = []
     for src in sources:
         for d in src.idx["defs"]:
             if fnmatch.fnmatch(d[0].lower(), pat):
-                if args.kind and d[1] != args.kind:
+                if d[1] in excluded:
                     continue
                 rows.append((d[1], d[0], src, d))
     if not rows:
@@ -307,11 +310,14 @@ def cmd_grep(args, sources):
         rx = re.compile(re.escape(pattern), re.IGNORECASE)
 
     cap = args.limit
+    excluded = set()
+    if args.exclude:
+        excluded = set(args.exclude.replace(",", " ").split())
     rows = []
     for src in sources:
         for d in src.idx["defs"]:
             if rx.search(d[0]):
-                if args.kind and d[1] != args.kind:
+                if d[1] in excluded:
                     continue
                 rows.append((d[1], d[0], src, d))
 
@@ -378,9 +384,10 @@ def cmd_list_file(args, sources):
 
     for src, fi in matches:
         spans = src.spans_by_file.get(fi, [])
-        if args.kind:
+        if args.exclude:
+            excluded = set(args.exclude.replace(",", " ").split())
             spans = [(s, e, name, kind) for s, e, name, kind in spans
-                     if kind == args.kind]
+                     if kind not in excluded]
         if args.pattern:
             pat = args.pattern.lower()
             spans = [(s, e, name, kind) for s, e, name, kind in spans
