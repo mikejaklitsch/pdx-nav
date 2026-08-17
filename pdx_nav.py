@@ -260,21 +260,8 @@ def build_index(source, root):
                     if idx.get("hash") == files_hash(root, files):
                         return idx, corpus_path
             else:
-                # mod: trust for a short TTL so query bursts don't re-stat
-                # the tree on the slow /mnt drive every call
-                import time
-                marker = cache / "validated_at"
-                try:
-                    if time.time() - float(marker.read_text()) < 30:
-                        return idx, corpus_path
-                except (OSError, ValueError):
-                    pass
                 files = collect_files(root)
                 if idx.get("hash") == files_hash(root, files):
-                    try:
-                        marker.write_text(str(time.time()))
-                    except OSError:
-                        pass
                     return idx, corpus_path
 
     if files is None:
