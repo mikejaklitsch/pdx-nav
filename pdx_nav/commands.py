@@ -347,7 +347,7 @@ def resolve_file_path(path_str, sources):
                 fi = src.files.index(rel)
                 results.append((src, fi))
                 continue
-        except (ValueError, OSError):
+        except (ValueError, OSError, TypeError):
             pass
 
         try:
@@ -357,7 +357,7 @@ def resolve_file_path(path_str, sources):
                 fi = src.files.index(rel)
                 results.append((src, fi))
                 continue
-        except (ValueError, OSError):
+        except (ValueError, OSError, TypeError):
             pass
 
         norm = path_str.lstrip("/")
@@ -388,6 +388,70 @@ def cmd_list_file(args, sources):
         for start, end, name, kind in spans:
             loc = f"L{start}-{end}" if end > start else f"L{start}"
             print(f"  {kind:<18} {name:<40} {loc}")
+    return 0
+
+
+GUI_OUTLINE_RE = re.compile(
+    r'^\s*(?:(template|local_template)\s+(\w+)'
+    r'|(types)\s+(\w+)'
+    r'|(type)\s+(\w+)\s*=\s*(\w+)'
+    r'|(block|blockoverride)\s+"([^"]+)"'
+    r'|(@\w+)\s*=\s*(.+))\s*\{?\s*$',
+    re.IGNORECASE)
+
+
+def cmd_outline(args, sources):
+    """Show the nested structure of a .gui file."""
+    matches = resolve_file_path(args.file, sources)
+    if not matches:
+        print(f"File not found in index: '{args.file}'")
+        return 1
+
+    src, fi = matches[0]
+    text = src.read_file(fi)
+    lines = text.split("\n")
+
+    depth = 0
+    in_string = False
+    stack = []
+
+    print(f"# {src.files[fi]} ({src.name}, {len(lines)} lines)")
+
+    for i, line in enumerate(lines, 1):
+        code, _, masked, in_string = split_line(line, in_string)
+        m = GUI_OUTLINE_RE.match(code)
+
+        if m:
+            if m.group(1):
+                kind, name = m.group(1), m.group(2)
+            elif m.group(3):
+                kind, name = "types", m.group(4)
+            elif m.group(5):
+                kind = "type"
+                name = f"{m.group(6)} = {m.group(7)}"
+            elif m.group(8):
+                kind, name = m.group(8), m.group(9)
+            elif m.group(10):
+                kind = "@var"
+                name = f"{m.group(10)} = {m.group(11).strip()}"
+            else:
+                kind, name = "?", "?"
+
+            indent = "  " * depth
+            print(f"  {indent}{kind:<16} {name}  L{i}")
+
+        opens = masked.count("{")
+        closes = masked.count("}")
+        new_depth = depth + opens - closes
+        if opens > 0 and m:
+            stack.append(name)
+        elif opens > 0:
+            stack.append(None)
+        for _ in range(max(depth - new_depth, 0)):
+            if stack:
+                stack.pop()
+        depth = max(new_depth, 0)
+
     return 0
 
 
