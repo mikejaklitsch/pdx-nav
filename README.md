@@ -41,6 +41,8 @@ the engine calls, what they dispatch, where subsystems connect, and what is
 orphaned. Drill into any definition with `graph <name>`, or trace callers
 upstream with `graph <name> --up`.
 
+<img src="docs/dependency-graph.png" width="600" alt="pdx-nav graph output showing a dependency tree from entry points through events and effects">
+
 ## What it indexes
 
 Scripts (.txt), GUI (.gui), and localization (.yml) across all three EU5
@@ -95,7 +97,7 @@ pdx_nav.py       # thin shim for symlink compatibility
 ## Setup
 
 ```bash
-ln -sf "$(pwd)/pdx_nav.py" ~/.local/bin/pdx-nav
+pipx install --editable .
 # vanilla root: defaults to the Steam install; override with PDX_GAME_ROOT
 ```
 
