@@ -7,9 +7,10 @@ name = "pdx-nav"
 version = "1.1.0"
 description = "Navigate and query Paradox (EU5) script structures"
 requires-python = ">=3.10"
+dependencies = ["pdx-utilities @ git+https://github.com/mikejaklitsch/pdx-utilities.git"]
 
 [project.scripts]
 pdx-nav = "pdx_nav.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["pdx_nav*", "pdx_utilities*"]
+include = ["pdx_nav*"]

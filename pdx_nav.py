@@ -10,6 +10,10 @@ from pathlib import Path
 _here = Path(__file__).resolve().parent
 if str(_here) not in sys.path:
     sys.path.insert(0, str(_here))
+# pdx_utilities is the shared sibling checkout (../pdx-utilities), not vendored.
+_shared = _here.parent / "pdx-utilities"
+if _shared.is_dir():
+    sys.path.insert(1, str(_shared))
 
 from pdx_nav.cli import main  # noqa: E402
 

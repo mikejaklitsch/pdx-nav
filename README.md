@@ -124,8 +124,11 @@ pdx_nav.py       # thin shim for symlink compatibility
 
 ```bash
 pipx install --editable .
+pipx inject pdx-nav --editable ../pdx-utilities
 # vanilla root: defaults to the Steam install; override with PDX_GAME_ROOT
 ```
+
+Shared helpers come from [pdx-utilities](../pdx-utilities), a separate repo checked out next to this one. The inject line makes edits there reach this tool immediately; a non-editable install pulls it from GitHub instead.
 
 First run builds the vanilla index (under a minute from vanilla-tracker;
 longer from a /mnt install). Warm queries run in about 0.5s, `graph` in about
