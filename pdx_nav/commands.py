@@ -7,10 +7,10 @@ from .constants import ENTRY_KINDS, VAR_WRITE_FAMILY
 from .output import fmt_def, suggest
 from .paths import find_mod_root, cache_dir_for
 from .scanner import split_line
-from pdx_utilities.git import git_latest_tag
 from pdx_utilities.paths import find_vanilla_repo
-from .source import (Source, build_index, build_tracker_index, vanilla_root)
-from .constants import VANILLA_CACHE_DIR
+from .source import (_refresh_tracker, _refresh_vanilla, cache_lock,
+                     mod_index, resolve_tracker_version, tracker_cache,
+                     vanilla_root)
 
 
 def cmd_def(args, sources):
@@ -51,7 +51,7 @@ def cmd_show(args, sources):
     block = lines[s - 1:e]
     print(f"# {src.files[fi]}:{s}-{e}  ({src.name} {kind}, {len(block)} lines)")
     maxn = args.lines
-    if len(block) <= maxn:
+    if not maxn or len(block) <= maxn:
         for i, line in enumerate(block):
             print(f"{s + i:5d}  {line}")
     else:
@@ -101,7 +101,7 @@ def cmd_context(args, sources):
 
     block = lines[s - 1:e]
     maxn = args.lines
-    if len(block) <= maxn:
+    if not maxn or len(block) <= maxn:
         for i, line in enumerate(block):
             print(f"{s + i:5d}  {line}")
     else:
@@ -142,7 +142,7 @@ def cmd_refs(args, sources):
         cur_file = None
         shown = 0
         for src, fi, ln, role, text, encl in hits:
-            if shown >= args.limit:
+            if args.limit and shown >= args.limit:
                 print(f"  ... {len(hits) - shown} more (use -n {len(hits)} to see all)")
                 break
             fkey = (src.name, fi)
@@ -255,11 +255,11 @@ def cmd_vars(args, sources):
 
     def show(title, rows):
         print(f"{title} ({len(rows)}):")
-        for src, fi, ln, text in rows[:args.limit]:
+        for src, fi, ln, text in (rows[:args.limit] if args.limit else rows):
             encl = src.enclosing(fi, ln)
             encl_s = f" in {encl[2]} ({encl[3]} L{encl[0]}-{encl[1]})" if encl else ""
             print(f"  {src.files[fi]}:{ln} ({src.name}){encl_s}: {text[:80]}")
-        if len(rows) > args.limit:
+        if args.limit and len(rows) > args.limit:
             print(f"  ... {len(rows) - args.limit} more")
 
     show("writes", writes)
@@ -330,7 +330,7 @@ def cmd_grep(args, sources):
     cur = None
     shown = 0
     for kind, name, src, d in rows:
-        if shown >= cap:
+        if cap and shown >= cap:
             remaining = len(rows) - shown
             print(f"\n+{remaining} more (use -n {len(rows)} to see all)")
             break
@@ -588,9 +588,46 @@ def _count_nodes(nodes, include_kinds):
     return n
 
 
-def cmd_rename(args, sources):
-    old, new = args.old, args.new
+def _rename_one(old, new, mod_src, scope, dry_run):
+    """Apply a single whole-identifier rename across mod files in scope.
+
+    Returns (changed, total) where changed is a list of (rel_path, count)
+    and total is the sum of counts.
+    """
+    from pdx_utilities.fileio import BOM_BYTES
     pat = re.compile(rf'(?<!\w){re.escape(old)}(?!\w)')
+
+    changed = []
+    total = 0
+    for rel in mod_src.files:
+        if scope and not rel.startswith(scope):
+            continue
+        path = mod_src.root / rel
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        has_bom = raw[:3] == BOM_BYTES
+        text = (raw[3:] if has_bom else raw).decode('utf-8', errors='replace')
+        new_text, count = pat.subn(new, text)
+        if count == 0:
+            continue
+        if not dry_run:
+            out = (BOM_BYTES + new_text.encode('utf-8')) if has_bom else new_text.encode('utf-8')
+            path.write_bytes(out)
+        changed.append((rel, count))
+        total += count
+
+    return changed, total
+
+
+def cmd_rename(args, sources):
+    if args.batch:
+        return _cmd_rename_batch(args, sources)
+
+    if not args.old or not args.new:
+        print("Error: old and new names required (or use --batch FILE)")
+        return 1
 
     mod_src = None
     for s in sources:
@@ -610,35 +647,13 @@ def cmd_rename(args, sources):
     if scope == ".":
         scope = ""
 
-    changed = []
-    total = 0
-    for rel in mod_src.files:
-        if scope and not rel.startswith(scope):
-            continue
-        path = mod_src.root / rel
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        from pdx_utilities.fileio import BOM_BYTES
-        has_bom = raw[:3] == BOM_BYTES
-        text = (raw[3:] if has_bom else raw).decode('utf-8', errors='replace')
-        new_text, count = pat.subn(new, text)
-        if count == 0:
-            continue
-        if not args.dry_run:
-            out = (BOM_BYTES + new_text.encode('utf-8')) if has_bom else new_text.encode('utf-8')
-            path.write_bytes(out)
-        changed.append((rel, count))
-        total += count
+    old, new = args.old, args.new
+    changed, total = _rename_one(old, new, mod_src, scope, args.dry_run)
 
     verb = "would rename" if args.dry_run else "renamed"
     print(f"{verb} '{old}' -> '{new}': {total} occurrences in {len(changed)} files")
     for rel, count in changed:
         print(f"  {rel}: {count}")
-
-    if not args.dry_run and total > 0:
-        print(f"\nRun `pdx-nav rebuild` to update the index.")
 
     vanilla_defs = sum(len(s.by_name.get(old, []))
                        for s in sources if s.name != "mod")
@@ -649,40 +664,151 @@ def cmd_rename(args, sources):
     return 0 if total > 0 else 1
 
 
-def cmd_rebuild(args, _sources):
+def _cmd_rename_batch(args, sources):
+    """Batch rename from a TSV file. Loads the index once, applies all entries."""
+    batch_path = Path(args.batch)
+    try:
+        lines = batch_path.read_text(encoding='utf-8').splitlines()
+    except OSError as e:
+        print(f"Error reading batch file: {e}")
+        return 1
+
+    entries = []
+    for i, line in enumerate(lines, 1):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) != 2:
+            print(f"Error: line {i}: expected old<TAB>new, got {len(parts)} fields")
+            return 1
+        entries.append((parts[0], parts[1]))
+
+    if not entries:
+        print("Error: batch file contains no entries")
+        return 1
+
+    # Guard against chained renames: no NEW name may equal another entry's OLD name.
+    old_names = {old for old, _ in entries}
+    new_names = {new for _, new in entries}
+    overlap = old_names & new_names
+    if overlap:
+        print(f"Error: chained rename detected; these names appear as both "
+              f"old and new: {', '.join(sorted(overlap))}")
+        return 1
+
+    mod_src = None
+    for s in sources:
+        if s.name == "mod":
+            mod_src = s
+            break
+    if not mod_src:
+        print("Error: no mod root found")
+        return 1
+
+    cwd = Path.cwd().resolve()
+    try:
+        scope = cwd.relative_to(mod_src.root).as_posix()
+    except ValueError:
+        print("Error: not inside the mod root")
+        return 1
+    if scope == ".":
+        scope = ""
+
+    # Build one combined pattern that matches any OLD name (whole-identifier).
+    # Use a replacement function to look up which entry matched.
+    from pdx_utilities.fileio import BOM_BYTES
+    replace_map = {old: new for old, new in entries}
+    # Sort longest-first so the alternation prefers longer matches.
+    sorted_olds = sorted(replace_map.keys(), key=len, reverse=True)
+    combined = re.compile(
+        r'(?<!\w)(?:' +
+        '|'.join(re.escape(old) for old in sorted_olds) +
+        r')(?!\w)')
+
+    # Per-entry counters: {old: (total_count, set_of_files)}
+    entry_stats = {old: [0, set()] for old in replace_map}
+    batch_files = set()
+
+    for rel in mod_src.files:
+        if scope and not rel.startswith(scope):
+            continue
+        path = mod_src.root / rel
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            continue
+        has_bom = raw[:3] == BOM_BYTES
+        text = (raw[3:] if has_bom else raw).decode('utf-8', errors='replace')
+
+        # Count per-entry hits in this file before replacing.
+        file_counts = {}
+        for m in combined.finditer(text):
+            old_hit = m.group()
+            file_counts[old_hit] = file_counts.get(old_hit, 0) + 1
+
+        if not file_counts:
+            continue
+
+        for old_hit, count in file_counts.items():
+            entry_stats[old_hit][0] += count
+            entry_stats[old_hit][1].add(rel)
+        batch_files.add(rel)
+
+        if not args.dry_run:
+            new_text = combined.sub(lambda m: replace_map[m.group()], text)
+            out = (BOM_BYTES + new_text.encode('utf-8')) if has_bom else new_text.encode('utf-8')
+            path.write_bytes(out)
+
+    verb = "would rename" if args.dry_run else "renamed"
+    batch_total = 0
+    batch_renames = 0
+
+    for old, new in entries:
+        total, files = entry_stats[old]
+        print(f"{verb} '{old}' -> '{new}': {total} occurrences in {len(files)} files")
+        batch_total += total
+        if total > 0:
+            batch_renames += 1
+
+    print(f"\nbatch: {batch_renames} renames, {batch_total} total occurrences, "
+          f"{len(batch_files)} files touched")
+
+    return 0
+
+
+def cmd_rebuild(args):
+    """Bring every index up to date now, in the foreground. Mod edits are
+    detected on every invocation anyway, so plain `rebuild` is only a cheap
+    re-verification; --full discards the caches."""
     mod = find_mod_root()
     if mod:
-        cache = cache_dir_for("mod", mod)
-        for f in ("index.json", "corpus.txt"):
-            p = cache / f
-            if p.exists():
-                p.unlink()
-        idx, _ = build_index("mod", mod)
+        idx, _ = mod_index(mod, force=args.full)
         print(f"mod: {len(idx['defs'])} definitions from "
               f"{len(idx['files'])} files")
+        graph_cache = cache_dir_for("mod", mod) / "graph.pkl"
+        if args.full:
+            graph_cache.unlink(missing_ok=True)
+    if args.mod_only:
+        return 0
 
     tracker = find_vanilla_repo(mod)
+    version = None
     if tracker:
-        version = getattr(args, "at", None) or git_latest_tag(tracker)
-        if version:
-            cache = VANILLA_CACHE_DIR / f"tracker-{version}"
-            if cache.exists():
-                for f in ("index.json", "corpus.txt"):
-                    p = cache / f
-                    if p.exists():
-                        p.unlink()
-            idx, _ = build_tracker_index(tracker, version, version)
-            print(f"vanilla@{version}: {len(idx['defs'])} definitions from "
-                  f"{len(idx['files'])} files")
+        version, commit = resolve_tracker_version(tracker, args.at)
+    if version:
+        cache = tracker_cache(version)
+        with cache_lock(cache):
+            idx = _refresh_tracker(tracker, version, commit, cache,
+                                   force=args.full)
+        print(f"vanilla@{version}: {len(idx['defs'])} definitions from "
+              f"{len(idx['files'])} files")
     else:
         v = vanilla_root()
         if v.is_dir():
             cache = cache_dir_for("vanilla", v)
-            for f in ("index.json", "corpus.txt"):
-                p = cache / f
-                if p.exists():
-                    p.unlink()
-            idx, _ = build_index("vanilla", v)
+            with cache_lock(cache):
+                idx = _refresh_vanilla(v, cache, force=args.full)
             print(f"vanilla: {len(idx['defs'])} definitions from "
                   f"{len(idx['files'])} files")
     return 0

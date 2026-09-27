@@ -3,7 +3,8 @@ from pathlib import Path
 
 from pdx_utilities.constants import SCAN_TOPDIRS, CODE_EXTS, EXCLUDE_PARTS  # noqa: F401
 
-VANILLA_CACHE_DIR = Path.home() / ".cache" / "pdx-nav"
+CACHE_DIR = Path.home() / ".cache" / "pdx-nav"
+VANILLA_CACHE_DIR = CACHE_DIR
 
 EXCLUDE_SUBTREES = ("gfx/map",)
 
@@ -24,6 +25,7 @@ KIND_DISPLAY = {
 
 DEF_RE = re.compile(r'^\s*(INJECT:|REPLACE:|TRY_INJECT:)?([A-Za-z_@][\w.]*)\s*[={]')
 GUI_DEF_RE = re.compile(r'^\s*(template|types|type|local_template)\s+(\w+)')
+GUI_INNER_TYPE_RE = re.compile(r'^\s*(type|local_template)\s+(\w+)')
 GUI_VAR_RE = re.compile(r'^\s*@(\w+)\s*=\s*(.+)')
 LOC_DEF_RE = re.compile(r'^\s*([\w.\-]+):\d*\s*"')
 MACRO_DEF_RE = re.compile(r'^\s*definition\s*=\s*"(\w+)(?:\(|")')
@@ -41,7 +43,16 @@ ENGINE_EVALUATED_KINDS = {"on_action", "auto_modifiers", "static_modifiers",
 WORD_RE = re.compile(r'[A-Za-z_@][\w.]*')
 TEMPLATE_TOKEN_RE = re.compile(r'[A-Za-z_][\w.]*(?:\$\w+\$[\w.]*)+')
 
-GRAPH_EXCLUDE_KINDS = {"loc", "gui_var", "map_modes"}
+# Kinds that do nothing unless something references them. Every other kind in
+# the mod index is a database object the engine loads on its own (buildings,
+# advances, laws, map data...), so it roots reachability.
+GRAPH_LIBRARY_KINDS = {"effect", "trigger", "script_value", "event",
+                       "scripted_lists", "loc", "template", "local_template",
+                       "type", "gui_var", "macro", "scripted_gui", "variable"}
+GRAPH_GUI_KINDS = {"template", "type", "types", "local_template", "gui_var"}
+# Engine-looked-up loc keys: <def>, <def>_desc, ... belong to that definition.
+LOC_DEF_SUFFIXES = ("_desc", "_DESC", "_why", "_tt", "_title", "_name",
+                    "_adj", "_plural", "_tooltip")
 GRAPH_DEFAULT_KINDS = {"on_action", "effect", "event", "script_value",
                        "trigger", "template", "type", "types",
                        "local_template", "building", "production_method",
@@ -50,6 +61,9 @@ GRAPH_TEMPLATE_RE = re.compile(
     r'(?:[A-Za-z_][\w.]*)?'
     r'(?:\$\w+\$[\w.]*)'
     r'(?:[\w.]*\$\w+\$[\w.]*)*'
+)
+GRAPH_CONCATENATE_RE = re.compile(
+    r"Concatenate\(\s*'([A-Za-z_][\w.]*)'"
 )
 GRAPH_NOISE_NAMES = {"namespace", "l_english"}
 GRAPH_VAR_WRITE_KW = re.compile(

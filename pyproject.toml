@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdx-nav"
-version = "1.0.0"
+version = "1.1.0"
 description = "Navigate and query Paradox (EU5) script structures"
 requires-python = ">=3.10"
 

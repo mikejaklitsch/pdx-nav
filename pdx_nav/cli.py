@@ -20,19 +20,22 @@ def main():
 
     s = sub.add_parser("show", help="Print a definition block")
     s.add_argument("name")
-    s.add_argument("-n", "--lines", type=int, default=120)
+    s.add_argument("-n", "--lines", type=int, default=0,
+                   help="Cap printed lines (0 = unlimited, the default)")
     s.add_argument("--vanilla", dest="source", action="store_const", const="vanilla")
     s.add_argument("--mod", dest="source", action="store_const", const="mod")
 
     ctx = sub.add_parser("context", help="Show definition with parent hierarchy")
     ctx.add_argument("name")
-    ctx.add_argument("-n", "--lines", type=int, default=60)
+    ctx.add_argument("-n", "--lines", type=int, default=0,
+                     help="Cap printed lines (0 = unlimited, the default)")
     ctx.add_argument("--vanilla", dest="source", action="store_const", const="vanilla")
     ctx.add_argument("--mod", dest="source", action="store_const", const="mod")
 
     r = sub.add_parser("refs", help="Find all references")
     r.add_argument("names", nargs="+")
-    r.add_argument("-n", "--limit", type=int, default=40)
+    r.add_argument("-n", "--limit", type=int, default=0,
+                   help="Cap printed results (0 = unlimited, the default)")
     r.add_argument("--mod-only", action="store_true")
     r.add_argument("--all-roles", action="store_true",
                    help="Include comment hits")
@@ -48,7 +51,8 @@ def main():
 
     v = sub.add_parser("vars", help="Variable writes/reads")
     v.add_argument("name")
-    v.add_argument("-n", "--limit", type=int, default=30)
+    v.add_argument("-n", "--limit", type=int, default=0,
+                   help="Cap printed results (0 = unlimited, the default)")
 
     ls = sub.add_parser("list", help="List definitions by glob or file")
     ls.add_argument("pattern", nargs="?", default=None)
@@ -61,7 +65,8 @@ def main():
     g.add_argument("pattern")
     g.add_argument("--exclude", metavar="KIND",
                    help="Exclude kinds (comma-separated)")
-    g.add_argument("-n", "--limit", type=int, default=50)
+    g.add_argument("-n", "--limit", type=int, default=0,
+                   help="Cap printed results (0 = unlimited, the default)")
 
     gr = sub.add_parser("graph", help="Dependency graph of all mod definitions")
     gr.add_argument("name", nargs="?", default=None,
@@ -93,20 +98,33 @@ def main():
                     "local_template, block, blockoverride, @var)")
 
     rn = sub.add_parser("rename", help="Rename a symbol across all mod files")
-    rn.add_argument("old", help="Current name")
-    rn.add_argument("new", help="New name")
+    rn.add_argument("old", nargs="?", help="Current name")
+    rn.add_argument("new", nargs="?", help="New name")
+    rn.add_argument("--batch", metavar="FILE",
+                    help="TSV file of old<TAB>new pairs (one per line)")
     rn.add_argument("--dry-run", action="store_true",
                     help="Show what would change without writing files")
 
-    sub.add_parser("rebuild", help="Force index rebuild")
+    rb = sub.add_parser("rebuild", help="Verify indexes and reparse changed "
+                        "files (edits are picked up automatically; this is "
+                        "rarely needed)")
+    rb.add_argument("--full", action="store_true",
+                    help="Discard caches and reparse every file from scratch")
+    rb.add_argument("--mod-only", action="store_true",
+                    help="Leave the vanilla index alone")
 
-    args = p.parse_args()
+    argv = sys.argv[1:]
+    if argv[:1] == ["_refresh"]:
+        from .source import refresh_main
+        return refresh_main(argv[1:])
+
+    args = p.parse_args(argv)
     if not args.cmd:
         p.print_help()
         return 0
 
     if args.cmd == "rebuild":
-        return cmd_rebuild(args, None)
+        return cmd_rebuild(args)
 
     sources = load_sources(at_version=args.at)
 
@@ -115,12 +133,18 @@ def main():
         if matches:
             args.source = matches[0].name
 
-    return {
+    handler = {
         "def": cmd_def, "show": cmd_show, "context": cmd_context,
         "refs": cmd_refs, "callers": cmd_callers, "stack": cmd_stack,
         "vars": cmd_vars, "list": cmd_list, "grep": cmd_grep,
         "outline": cmd_outline, "rename": cmd_rename, "graph": cmd_graph,
-    }[args.cmd](args, sources)
+    }[args.cmd]
+    try:
+        return handler(args, sources)
+    except BrokenPipeError:
+        # Output piped into head/less that exited early.
+        sys.stderr.close()
+        return 0
 
 
 if __name__ == "__main__":

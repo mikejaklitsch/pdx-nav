@@ -19,7 +19,7 @@ pdx-nav list <glob> [--kind] # enumerate definitions
 pdx-nav list --file <path>   # list all definitions in one file (file order)
 pdx-nav grep <pattern>       # full-text search over indexed symbol names
 pdx-nav graph                # dependency graph: trees, orphans, cross-system edges
-pdx-nav rebuild              # force reindex (run after a game patch if the sentinel misses it)
+pdx-nav rebuild [--full]     # verify indexes now (edits are picked up automatically)
 ```
 
 `stack` reconstructs dispatch chains end to end, e.g.:
@@ -41,6 +41,17 @@ the engine calls, what they dispatch, where subsystems connect, and what is
 orphaned. Drill into any definition with `graph <name>`, or trace callers
 upstream with `graph <name> --up`.
 
+Reachability is always traced through every definition in the mod, whatever
+`--kind`/`--all` shows: `graph --orphans-only --kind trigger` lists triggers
+nothing reaches, not triggers whose callers happen to be other kinds. Roots
+are on_actions and other engine-evaluated kinds, names used in `.gui` data
+binding, engine-loaded database definitions (buildings, advances, laws, map
+data...), and overrides of vanilla names (vanilla's callers now run the mod's
+version). Data-binding expressions inside strings (`"[TC.GetTag]"`) and loc
+text count as references, and `<name>`/`<name>_desc` loc keys belong to their
+definition. Hidden kinds are collapsed out of the trees, so `--kind event`
+shows the events on_actions fire as entry points.
+
 <img src="docs/dependency-graph.png" width="600" alt="pdx-nav graph output showing a dependency tree from entry points through events and effects">
 
 ## What it indexes
@@ -59,15 +70,29 @@ recorded as override flags.
 
 ## How it works
 
-- **Index** (definitions, kinds, line spans): built once per source. Cached
-  at `<mod>/.claude/pdx_nav/` and `~/.cache/pdx-nav/`.
+- **Index** (definitions, kinds, line spans, per-file signatures): cached
+  under `~/.cache/pdx-nav/` (`mod-<hash>`, `tracker-<version>`, or the
+  install hash) on the native filesystem.
 - **Corpus**: a local concatenated copy (`fileid:line:text`) of all indexed
   files, so reference queries ripgrep one native-filesystem file instead of
   crawling thousands of files on a slow /mnt drive.
-- **Cache validation**: vanilla uses a patch sentinel
-  (`<install>/binaries/checksum.txt` changes every patch) when available,
-  otherwise a file-hash check. The mod side re-stats its tree per invocation.
-  `pdx-nav rebuild` forces a full reindex.
+- **Incremental refresh**: every file carries a signature (mtime/size on
+  disk, blob sha in git). A refresh reparses only files whose signature
+  changed and splices everything else from the previous corpus, so an edit
+  costs one file's parse. The graph caches per-file tokens the same way.
+- **Mod**: re-stats its tree on every invocation (threaded, ~0.2s over /mnt)
+  and refreshes synchronously, so results always reflect the latest edit.
+- **Vanilla**: never blocks once an index exists. A patch (the install's
+  `binaries/checksum.txt` sentinel changes) or a new vanilla-tracker tag is
+  rebuilt by a detached background process while queries keep answering from
+  the previous index (a stderr note says so). A new tracker version reuses
+  every unchanged blob from an existing version, so it builds in seconds.
+  Without a sentinel, the install is re-verified in the background every 10
+  minutes. Only the very first build blocks.
+- **Concurrency**: builds take a per-cache lock and publish atomically, so
+  parallel agents never double-build or read a half-written index.
+- `pdx-nav rebuild` re-verifies in the foreground (cheap); `--full` discards
+  the caches and reparses everything; `--mod-only` skips vanilla.
 - **Vanilla tracker**: when a bare git repo is found at
   `$PDX_VANILLA_REPO` or `<mod-parent>/vanilla-tracker/repo.git`, it is used
   instead of the live game install. `--at <version>` selects a specific tag.
@@ -75,7 +100,8 @@ recorded as override flags.
   comments are hidden by default, hits inside string literals are tagged
   `string`, code hits are `use`. Enclosure is resolved from the span index.
 - Excluded from indexing: `gfx/map` (generated map-object blobs),
-  tool/VCS directories.
+  tool/VCS directories, and non-English vanilla localization (two thirds of
+  the vanilla corpus; refs over it only duplicated English hits).
 
 ## Package structure
 
@@ -101,8 +127,9 @@ pipx install --editable .
 # vanilla root: defaults to the Steam install; override with PDX_GAME_ROOT
 ```
 
-First run builds the vanilla index (~5 min over /mnt; one-time per patch).
-Warm queries run in about 1-3s.
+First run builds the vanilla index (under a minute from vanilla-tracker;
+longer from a /mnt install). Warm queries run in about 0.5s, `graph` in about
+1s.
 
 ## Known limitations
 

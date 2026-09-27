@@ -1,4 +1,5 @@
-from .constants import DEF_RE, GUI_DEF_RE, GUI_VAR_RE, KIND_DISPLAY, LOC_DEF_RE, MACRO_DEF_RE
+from .constants import (DEF_RE, GUI_DEF_RE, GUI_INNER_TYPE_RE, GUI_VAR_RE,
+                        KIND_DISPLAY, LOC_DEF_RE, MACRO_DEF_RE)
 from .scanner import split_line
 
 
@@ -37,6 +38,8 @@ def parse_defs(text, rel):
     in_string = False
     pending = None
     macro_block_start = None
+    gui_types_depth = 0
+    gui_inner_pending = None
     for i, line in enumerate(text.split("\n"), 1):
         code, _, masked, in_string = split_line(line, in_string)
         if depth == 0:
@@ -59,17 +62,46 @@ def parse_defs(text, rel):
                 if m:
                     flag = (m.group(1) or "").rstrip(":")
                     pending = (m.group(2), kind, flag, i)
+        elif kind == "gui" and gui_types_depth > 0 and not gui_inner_pending:
+            m = GUI_INNER_TYPE_RE.match(code)
+            if m:
+                gui_inner_pending = (m.group(2), m.group(1), "", i)
         elif is_macro_file and macro_block_start and depth == 1:
             m = MACRO_DEF_RE.match(code)
             if m:
                 pending = (m.group(1), "macro", "", macro_block_start)
         opens, closes = masked.count("{"), masked.count("}")
         new_depth = depth + opens - closes
+        if gui_inner_pending:
+            if new_depth <= 1 and depth > 1:
+                defs.append((gui_inner_pending[0], gui_inner_pending[1],
+                             gui_inner_pending[3], i, gui_inner_pending[2]))
+                gui_inner_pending = None
+            elif depth == 1 and opens > 0 and new_depth == 1:
+                defs.append((gui_inner_pending[0], gui_inner_pending[1],
+                             i, i, gui_inner_pending[2]))
+                gui_inner_pending = None
+            elif depth == 1 and opens == 0:
+                defs.append((gui_inner_pending[0], gui_inner_pending[1],
+                             i, i, gui_inner_pending[2]))
+                gui_inner_pending = None
+        if gui_types_depth == -1 and opens > 0:
+            gui_types_depth = new_depth
+        elif gui_types_depth > 0:
+            gui_types_depth += opens - closes
+            if gui_types_depth <= 0:
+                gui_types_depth = 0
+                gui_inner_pending = None
         if pending and depth == 0:
             if opens == 0 or new_depth == 0:
+                if kind == "gui" and pending[1] == "types":
+                    gui_types_depth = -1 if opens == 0 else new_depth
                 defs.append((pending[0], pending[1], i, i, pending[2]))
                 pending = None
                 macro_block_start = None
+            elif opens > 0:
+                if kind == "gui" and pending[1] == "types":
+                    gui_types_depth = new_depth
         elif pending and new_depth == 0 and depth > 0:
             defs.append((pending[0], pending[1], pending[3], i, pending[2]))
             pending = None
@@ -77,6 +109,10 @@ def parse_defs(text, rel):
         elif not pending and new_depth == 0 and depth > 0:
             macro_block_start = None
         depth = max(new_depth, 0)
+    if gui_inner_pending:
+        defs.append((gui_inner_pending[0], gui_inner_pending[1],
+                     gui_inner_pending[3], gui_inner_pending[3],
+                     gui_inner_pending[2]))
     if pending:
         defs.append((pending[0], pending[1], pending[3], pending[3], pending[2]))
     return defs

@@ -34,12 +34,42 @@ def fmt_def(d, src):
     return f"  {kind:<18} {loc}  ({src.name}){flag_s}"
 
 
+def _suggest_pool(name, names, cap=3000, grams=False):
+    """Narrow ~10^5 indexed names to plausible candidates before difflib
+    (which costs a SequenceMatcher per candidate). Candidates must fit the
+    length bound implied by the 0.6 cutoff and share name segments (or, with
+    grams, 3-letter substrings) with the query; the most-overlapping ones
+    are kept."""
+    n = len(name)
+    lo, hi = n * 3 / 7, n * 7 / 3
+    if grams:
+        segs = {name[i:i + 3] for i in range(max(n - 2, 1))}
+    else:
+        segs = {s for s in re.split(r'[_.\-:]+', name) if len(s) >= 3}
+    if not segs:
+        return []
+    scored = []
+    for c in names:
+        if lo <= len(c) <= hi:
+            hits = sum(1 for s in segs if s in c)
+            if hits:
+                scored.append((hits, c))
+    if len(scored) > cap:
+        scored.sort(key=lambda x: -x[0])
+        scored = scored[:cap]
+    return [c for _, c in scored]
+
+
 def suggest(name, sources):
     import difflib
     names = set()
     for src in sources:
         names.update(src.by_name.keys())
-    close = difflib.get_close_matches(name, list(names), n=5, cutoff=0.6)
+    close = difflib.get_close_matches(name, _suggest_pool(name, names),
+                                      n=5, cutoff=0.6)
+    if not close:
+        close = difflib.get_close_matches(
+            name, _suggest_pool(name, names, grams=True), n=5, cutoff=0.6)
     if close:
         print("Did you mean:")
         for c in close:

@@ -1,14 +1,20 @@
 import re
+from functools import lru_cache
 
 from .constants import TEMPLATE_TOKEN_RE
 from .scanner import split_line
 
 
-def template_matches(tok, name):
-    """Does a $param$-templated token expand to <name> for some substitution?"""
+@lru_cache(maxsize=4096)
+def template_regex(tok):
     rx = re.escape(tok)
     rx = re.sub(r'\\\$\w+\\\$', r'\\w+', rx)
-    return re.fullmatch(rx, name) is not None
+    return re.compile(rx)
+
+
+def template_matches(tok, name):
+    """Does a $param$-templated token expand to <name> for some substitution?"""
+    return template_regex(tok).fullmatch(name) is not None
 
 
 def classify_hit(name, text, src, fi, line_no):
