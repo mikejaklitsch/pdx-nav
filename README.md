@@ -19,8 +19,15 @@ pdx-nav list <glob> [--kind] # enumerate definitions
 pdx-nav list --file <path>   # list all definitions in one file (file order)
 pdx-nav grep <pattern>       # full-text search over indexed symbol names
 pdx-nav graph                # dependency graph: trees, orphans, cross-system edges
+pdx-nav rename <old> <new>   # rename a symbol in every mod file (--dry-run first)
+pdx-nav rename --batch pairs.tsv --dry-run   # old<TAB>new per line
 pdx-nav rebuild [--full]     # verify indexes now (edits are picked up automatically)
 ```
+
+`rename` edits mod files only. After the rename report it lists every vanilla
+line that still names an old name, with its role: a vanilla definition of the
+same name, or a vanilla reference (an advance that unlocks it, an event that
+checks it). The mod must override those vanilla files, or keep the old name.
 
 `stack` reconstructs dispatch chains end to end, e.g.:
 

@@ -2,7 +2,7 @@ import fnmatch
 import re
 from pathlib import Path
 
-from .classify import gather_refs, print_templated, templated_hits
+from .classify import classify_hit, gather_refs, print_templated, templated_hits
 from .constants import ENTRY_KINDS, VAR_WRITE_FAMILY
 from .output import fmt_def, suggest
 from .paths import find_mod_root, cache_dir_for
@@ -588,6 +588,50 @@ def _count_nodes(nodes, include_kinds):
     return n
 
 
+VANILLA_SITES_SHOWN = 5
+
+
+def vanilla_sites(names, sources):
+    """Map each name to the vanilla lines that name it: [(src, fi, line, role, text)].
+
+    rename edits only mod files. A vanilla file that names an old name keeps
+    it, and nothing in the mod defines that name any more. One searcher call
+    per vanilla source covers every name.
+    """
+    names = sorted(set(names), key=len, reverse=True)
+    if not names:
+        return {}
+    pattern = "|".join(re.escape(n) for n in names)
+    exact = re.compile(rf'(?<![\w.])({pattern})(?!\w)')
+    found = {}
+    for src in sources:
+        if src.name == "mod":
+            continue
+        for fi, ln, text in src.rg(f"(?:{pattern})", fixed=False, word=True):
+            for name in {m.group(1) for m in exact.finditer(text)}:
+                role = classify_hit(name, text, src, fi, ln)
+                found.setdefault(name, []).append((src, fi, ln, role, text.strip()))
+    return found
+
+
+def print_vanilla_sites(found, order):
+    """Print the vanilla sites that a rename leaves on the old names."""
+    names = [n for n in order if found.get(n)]
+    if not names:
+        return
+    total = sum(len(found[n]) for n in names)
+    print(f"\nVanilla still names {len(names)} old name(s) at {total} site(s). "
+          "rename does not edit vanilla: override these files in the mod, "
+          "or keep the old name.")
+    for name in names:
+        sites = found[name]
+        print(f"  {name}: {len(sites)} site(s)")
+        for src, fi, ln, role, text in sites[:VANILLA_SITES_SHOWN]:
+            print(f"    {src.files[fi]}:{ln} ({src.name}) [{role}]: {text[:80]}")
+        if len(sites) > VANILLA_SITES_SHOWN:
+            print(f"    ... {len(sites) - VANILLA_SITES_SHOWN} more (pdx-nav refs {name})")
+
+
 def _rename_one(old, new, mod_src, scope, dry_run):
     """Apply a single whole-identifier rename across mod files in scope.
 
@@ -655,11 +699,7 @@ def cmd_rename(args, sources):
     for rel, count in changed:
         print(f"  {rel}: {count}")
 
-    vanilla_defs = sum(len(s.by_name.get(old, []))
-                       for s in sources if s.name != "mod")
-    if vanilla_defs:
-        print(f"\nNote: '{old}' also exists in vanilla "
-              f"({vanilla_defs} definitions), not modified.")
+    print_vanilla_sites(vanilla_sites([old], sources), [old])
 
     return 0 if total > 0 else 1
 
@@ -773,6 +813,8 @@ def _cmd_rename_batch(args, sources):
 
     print(f"\nbatch: {batch_renames} renames, {batch_total} total occurrences, "
           f"{len(batch_files)} files touched")
+    olds = [old for old, _ in entries]
+    print_vanilla_sites(vanilla_sites(olds, sources), olds)
 
     return 0
 
